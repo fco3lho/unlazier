@@ -146,11 +146,11 @@ Subscriptions such as Claude and ChatGPT limit how much you can use in a 5-hour 
 | below 70% | Runs as much work in parallel as it can |
 | 70% to 85% | Runs at most 2 tasks at a time |
 | 85% to 95% | Works on one task at a time, without helper agents |
-| 95% or more | Stops starting new work and finishes the current step; the tool decides whether to wait and resume after the limit |
+| 95% or more | Works on one task at a time, in small steps that each leave the work consistent; at the limit, see below |
 
 When the **weekly** window reaches 99%, the assistant finishes the current step, tells you, and waits.
 
-At the **usage limit**, Claude Code v2.1.234 or later can wait in the open session and resume after a claude.ai subscription limit resets. It is on by default, and you control it with `autoContinueAtUsageLimit` in user settings, `/config`, or `/rate-limit-options` (where you can also cancel a wait). Unlazier does not change this setting or run its own waiter: the assistant follows your choice. When the tool offers no wait — other tools, older versions, `-p` runs, or API keys — the assistant finishes the current step, tells you, and waits. Claude Code stops after three automatic continuations.
+At the **usage limit**, the tool decides what happens. Claude Code v2.1.234 or later can [wait in the open session and continue the task](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset) after a claude.ai subscription limit resets. It is on by default, and you control it with `autoContinueAtUsageLimit` in user settings, `/config`, or `/rate-limit-options` (where you can also start or cancel a wait). So in Claude Code the assistant keeps working until the limit instead of stopping early, and Claude Code then waits and continues, or leaves the next step to you, as you chose. Unlazier does not change this setting or run its own waiter. Other tools offer no such wait, so there the assistant finishes the current step, tells you, and waits.
 
 When it parallelizes, it prefers, in this order: helper agents for parts of the same task, then different tasks of the same request, then different requests.
 
@@ -169,7 +169,7 @@ When it parallelizes, it prefers, in this order: helper agents for parts of the 
     {"captured_at": 1794668291, "five_hour": {"used_percentage": 24, "resets_at": 1794683400}, "seven_day": {"used_percentage": 60, "resets_at": 1794978000}}
     ```
 
-    `captured_at` is the current time in seconds. Usage data is available only on Claude subscription plans, not with an API key.
+    `captured_at` is the current time in seconds. Usage data is available only on Claude subscription plans, not with an API key. The usage line also follows each subagent call, so the assistant sees usage climb during a long turn.
 - **Codex CLI** writes usage into its own session log, which the reminder reads. Nothing to set up.
 - **Other tools** do not expose usage, so the reminder says `Usage: unknown`. The assistant then runs at most 2 to 3 tasks at a time and asks you before running more than 5.
 

@@ -460,9 +460,12 @@ param(
         $harnessHome = Get-HarnessHome $Name
         switch ($Name) {
             'claude' {
+                # The reminder reaches the model only with a prompt; the PostToolUse hook refreshes
+                # the usage line after each subagent, the long step of a turn.
                 return Update-HookConfig ([System.IO.Path]::Combine($harnessHome, 'settings.json')) @(
                     (New-Registration 'UserPromptSubmit' '' (Get-HookCommand 'claude' 'prompt')),
-                    (New-Registration 'SessionStart' 'compact' (Get-HookCommand 'claude' 'compact'))
+                    (New-Registration 'SessionStart' 'compact' (Get-HookCommand 'claude' 'compact')),
+                    (New-Registration 'PostToolUse' 'Agent' (Get-HookCommand 'claude' 'subagent'))
                 )
             }
             'codex' {
@@ -795,6 +798,19 @@ param(
         Remove-RuleFiles $folder
     }
 
+    # Deletes each path that is an existing file; returns whether it deleted any.
+    function Remove-ExistingFiles {
+        param([string[]]$Paths)
+        $removed = $false
+        foreach ($path in $Paths) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                Remove-Item -LiteralPath $path -Force
+                $removed = $true
+            }
+        }
+        return $removed
+    }
+
     # Removes what version 2.0 installed under its old name, so it does not load next to the
     # renamed files. Hook entries, the status line, and rule files need nothing extra: their
     # names contain "unlazier", which matches both names.
@@ -813,11 +829,7 @@ param(
             { $_ -in @('opencode', 'amp') } { $legacyFiles = @([System.IO.Path]::Combine($harnessHome, 'plugins', "$LegacyName.ts")) }
             'kiro' { $legacyFiles = @([System.IO.Path]::Combine($harnessHome, 'hooks', "$LegacyName.json")) }
         }
-        foreach ($path in $legacyFiles) {
-            if (Test-Path -LiteralPath $path -PathType Leaf) {
-                Remove-Item -LiteralPath $path -Force
-            }
-        }
+        [void](Remove-ExistingFiles $legacyFiles)
         $legacyFolder = [System.IO.Path]::Combine($harnessHome, $LegacyName)
         if (Test-Path -LiteralPath $legacyFolder -PathType Container) {
             Remove-Item -LiteralPath $legacyFolder -Recurse -Force
@@ -834,12 +846,17 @@ param(
             $source = [System.IO.Path]::Combine($State.SourceDirectory, $relativePath)
             Copy-Item -LiteralPath $source -Destination ([System.IO.Path]::Combine($target, (Split-Path -Leaf $relativePath))) -Force
         }
-        # Earlier versions installed background waiters here; no current rule calls them.
-        foreach ($obsolete in @('wait-usage.sh', 'wait-usage.ps1')) {
-            $obsoletePath = [System.IO.Path]::Combine($target, $obsolete)
-            if (Test-Path -LiteralPath $obsoletePath -PathType Leaf) {
-                Remove-Item -LiteralPath $obsoletePath -Force
-            }
+    }
+
+    # Builds from main before 2.2.0 installed background waiters into the payload folder. They
+    # are deleted only after the new rules are written, so the rules on disk never call a missing
+    # script; sessions opened before the upgrade still hold the old rules, hence the notice.
+    function Remove-ObsoleteWaiters {
+        param([string]$Name)
+        $target = [System.IO.Path]::Combine((Get-HarnessHome $Name), $PayloadDirectoryName)
+        $waiters = @('wait-usage.sh', 'wait-usage.ps1') | ForEach-Object { [System.IO.Path]::Combine($target, $_) }
+        if (Remove-ExistingFiles $waiters) {
+            Add-Notice "$(Get-HarnessLabel $Name): restart sessions opened before this install; their rules still call the removed wait-usage script."
         }
     }
 
@@ -1109,6 +1126,7 @@ param(
         Remove-LegacyNames $Name
         Install-Payload $Name
         Install-Rules $Name
+        Remove-ObsoleteWaiters $Name
         if ($Name -in @('opencode', 'amp')) {
             # One plugin carries both the reminder and the alerts.
             [void](Register-Hooks $Name)

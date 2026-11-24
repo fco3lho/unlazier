@@ -266,6 +266,10 @@ function Test-InstallAddsAllLayers {
         @(Get-HookCommands $claudeSettings 'UserPromptSubmit' | Where-Object { $_.Contains('inject.ps1" claude prompt') }).Count -eq 1
     }
     Assert-That 'Claude compaction hook' { @($claudeSettings.hooks.SessionStart | Where-Object { $_.matcher -eq 'compact' }).Count -eq 1 }
+    Assert-That 'Claude subagent usage hook' {
+        @($claudeSettings.hooks.PostToolUse | Where-Object { $_.matcher -eq 'Agent' } | ForEach-Object { $_.hooks } |
+            Where-Object { $_.command.Contains('inject.ps1" claude subagent') }).Count -eq 1
+    }
     Assert-That 'Claude status line installed' { $claudeSettings.statusLine.command.Contains('claude-statusline.ps1') }
     Assert-That 'Claude status line refreshes every minute' { $claudeSettings.statusLine.refreshInterval -eq 60 }
     Assert-That 'Codex hooks registered' {
@@ -333,6 +337,10 @@ function Test-ReinstallIsIdempotent {
     Assert-That 'one block in Codex AGENTS.md' { (Get-BlockCount (Join-TestPath $testHome '.codex/AGENTS.md')) -eq 1 }
     Assert-That 'one Claude prompt hook' {
         @(Get-HookCommands (Read-TestJson (Join-TestPath $testHome '.claude/settings.json')) 'UserPromptSubmit' |
+            Where-Object { $_.Contains('unlazier') }).Count -eq 1
+    }
+    Assert-That 'one Claude subagent usage hook' {
+        @(Get-HookCommands (Read-TestJson (Join-TestPath $testHome '.claude/settings.json')) 'PostToolUse' |
             Where-Object { $_.Contains('unlazier') }).Count -eq 1
     }
     Assert-That 'one Codex prompt hook' {
@@ -516,6 +524,11 @@ function Test-InjectUsageLines {
     Assert-That 'Claude usage line' {
         (Get-LastLine (Invoke-Inject $testHome '.claude' 'claude' 'prompt')) -eq 'Usage: 5h 24% | weekly unknown (source: Claude Code status line, 2 min old)'
     }
+    Assert-That 'Claude subagent context is only the usage line' {
+        $output = (ConvertFrom-OutputJson (Invoke-Inject $testHome '.claude' 'claude' 'subagent')).hookSpecificOutput
+        $output.hookEventName -eq 'PostToolUse' -and
+            $output.additionalContext -eq 'Usage: 5h 24% | weekly unknown (source: Claude Code status line, 2 min old)'
+    }
     Assert-That 'Codex usage line' {
         (Get-LastLine (Invoke-Inject $testHome '.codex' 'codex' 'prompt')) -eq 'Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old)'
     }
@@ -557,6 +570,7 @@ function Test-InjectOutputFormats {
         (ConvertFrom-OutputJson (Invoke-Inject $testHome 'Documents/Cline' 'cline' 'prompt')).contextModification.StartsWith('Unlazier rules')
     }
     Assert-That 'unknown event fails' { (Invoke-Inject $testHome '.claude' 'claude' 'other').ExitCode -eq 2 }
+    Assert-That 'subagent event fails outside Claude' { (Invoke-Inject $testHome '.gemini' 'gemini' 'subagent').ExitCode -eq 2 }
 }
 
 # Runs inject.ps1 for the harness from the given directory, as the harness does from the project.
@@ -656,19 +670,25 @@ function Test-UpgradeRemovesObsoletePayload {
     Write-Host 'install removes obsolete payload files'
     $testHome = New-TestHome
     $payload = Join-TestPath $testHome '.claude/unlazier'
-    [void][System.IO.Directory]::CreateDirectory($payload)
     Write-TestFile (Join-TestPath $payload 'wait-usage.sh') 'old'
     Write-TestFile (Join-TestPath $payload 'wait-usage.ps1') 'old'
-    [void](Invoke-Installer $testHome @('-Harness', 'claude'))
+    Write-TestFile (Join-TestPath $payload 'other.txt') 'keep'
+    $result = Invoke-Installer $testHome @('-Harness', 'claude')
 
+    Assert-That 'open sessions told to restart' {
+        @($result.Lines | Where-Object { $_ -like '*restart sessions opened before*' }).Count -eq 1
+    }
+    Assert-That 'no restart notice without waiters' {
+        @((Invoke-Installer $testHome @('-Harness', 'claude')).Lines | Where-Object { $_ -like '*restart sessions opened before*' }).Count -eq 0
+    }
     Assert-That 'obsolete shell waiter removed' {
         -not (Test-Path -LiteralPath (Join-TestPath $payload 'wait-usage.sh'))
     }
     Assert-That 'obsolete PowerShell waiter removed' {
         -not (Test-Path -LiteralPath (Join-TestPath $payload 'wait-usage.ps1'))
     }
-    Assert-That 'current payload kept' {
-        Test-Path -LiteralPath (Join-TestPath $payload 'inject.ps1') -PathType Leaf
+    Assert-That 'other files in the folder kept' {
+        Test-Path -LiteralPath (Join-TestPath $payload 'other.txt') -PathType Leaf
     }
 }
 

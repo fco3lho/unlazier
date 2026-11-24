@@ -16,6 +16,7 @@ ring_terminal_bell() {
 play_alert() {
     if grep -qi microsoft /proc/version 2>/dev/null; then
         # WSL has no Linux sound device, so Windows plays the beep.
+        # shellcheck disable=SC2016  # PowerShell program, not a shell expansion
         powershell.exe -NoProfile -Command \
             'for ($i = 0; $i -lt 3; $i++) { [console]::beep(700, 200); Start-Sleep -Milliseconds 5 }' \
             >/dev/null 2>&1

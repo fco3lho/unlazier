@@ -1,10 +1,12 @@
 #!/bin/bash
 # Unlazier context hook for Linux and macOS.
 #
-# Usage: inject.sh <harness> <prompt|compact>
+# Usage: inject.sh <harness> <prompt|compact|subagent>
 #   prompt   prints the short reminder and the usage line; runs on every user prompt.
 #   compact  prints the core principles, the reminder, and the usage line; runs after
 #            context compaction, when the original instructions may have been summarized away.
+#   subagent prints only the usage line, as Claude Code PostToolUse context; runs after each
+#            subagent call, so a long turn sees usage change between prompts.
 #
 # Rules loaded at session start lose weight as the context window fills, so the harness
 # calls this hook to place a compact copy near the end of the context. Installed at
@@ -152,8 +154,15 @@ build_context() {
             echo
             cat "$SCRIPT_DIR/reminder.md"
             ;;
+        subagent)
+            # The reminder already arrived with the prompt; only the usage may have changed.
+            if [ "$harness" != "claude" ]; then
+                echo "inject.sh: the subagent event is only for claude" >&2
+                return 1
+            fi
+            ;;
         *)
-            echo "inject.sh: unknown event '$event' (expected prompt or compact)" >&2
+            echo "inject.sh: unknown event '$event' (expected prompt, compact, or subagent)" >&2
             return 1
             ;;
     esac
@@ -162,10 +171,19 @@ build_context() {
 
 # Each harness expects its own output shape; see the adapter table in README.md.
 emit() {
-    local harness="$1" context="$2"
+    local harness="$1" event="$2" context="$3"
     case "$harness" in
+        claude)
+            if [ "$event" = "subagent" ]; then
+                # After a tool call, Claude Code passes hook output to the model only as JSON.
+                jq -n --arg context "$context" \
+                    '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $context}}'
+            else
+                printf '%s\n' "$context"
+            fi
+            ;;
         # The OpenCode and Amp plugins read this plain text and hand it to the model themselves.
-        claude|codex|kiro|opencode|amp)
+        codex|kiro|opencode|amp)
             printf '%s\n' "$context"
             ;;
         gemini)
@@ -188,12 +206,12 @@ emit() {
 
 main() {
     if [ "$#" -ne 2 ]; then
-        echo "Usage: inject.sh <harness> <prompt|compact>" >&2
+        echo "Usage: inject.sh <harness> <prompt|compact|subagent>" >&2
         exit 2
     fi
     local context
     context="$(build_context "$1" "$2")" || exit 2
-    emit "$1" "$context"
+    emit "$1" "$2" "$context"
 }
 
 main "$@"

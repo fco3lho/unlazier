@@ -148,11 +148,11 @@ Assinaturas como as do Claude e do ChatGPT limitam quanto você pode usar numa j
 | abaixo de 70% | Roda em paralelo o máximo de trabalho que conseguir |
 | de 70% a 85% | Roda no máximo 2 tarefas ao mesmo tempo |
 | de 85% a 95% | Trabalha numa tarefa por vez, sem agentes auxiliares |
-| 95% ou mais | Para de começar trabalho novo e termina o passo atual; a ferramenta decide se espera e retoma após o limite |
+| 95% ou mais | Trabalha numa tarefa por vez, em passos pequenos que deixam o trabalho consistente; no limite, veja abaixo |
 
 Quando a janela **semanal** chega a 99%, o assistente termina o passo atual, avisa você e espera.
 
-No **limite de uso**, o Claude Code v2.1.234 ou mais recente espera na sessão aberta e retoma após o reinício de um limite da assinatura claude.ai. Isso vem ligado por padrão, e você controla com `autoContinueAtUsageLimit` nas configurações de usuário, no `/config` ou no `/rate-limit-options` (onde também pode cancelar uma espera). O Unlazier não altera essa configuração nem inicia uma espera própria: o assistente segue a sua escolha. Quando a ferramenta não oferece espera — outras ferramentas, versões antigas, execuções `-p` ou chaves de API —, o assistente termina o passo atual, avisa você e espera. O Claude Code para após três retomadas automáticas.
+No **limite de uso**, quem decide é a ferramenta. O Claude Code v2.1.234 ou mais recente pode [esperar na sessão aberta e continuar a tarefa](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset) após o reinício de um limite da assinatura claude.ai. Isso vem ligado por padrão, e você controla com `autoContinueAtUsageLimit` nas configurações de usuário, no `/config` ou no `/rate-limit-options` (onde também pode iniciar ou cancelar uma espera). Por isso, no Claude Code o assistente continua trabalhando até o limite em vez de parar antes, e o Claude Code então espera e continua, ou deixa o próximo passo com você, conforme a sua escolha. O Unlazier não altera essa configuração nem inicia uma espera própria. As outras ferramentas não oferecem essa espera, então nelas o assistente termina o passo atual, avisa você e espera.
 
 Quando paraleliza, ele prefere, nesta ordem: agentes auxiliares para partes da mesma tarefa, depois tarefas diferentes do mesmo pedido, depois pedidos diferentes.
 
@@ -171,7 +171,7 @@ Quando paraleliza, ele prefere, nesta ordem: agentes auxiliares para partes da m
     {"captured_at": 1794668291, "five_hour": {"used_percentage": 24, "resets_at": 1794683400}, "seven_day": {"used_percentage": 60, "resets_at": 1794978000}}
     ```
 
-    `captured_at` é o horário atual em segundos. Os dados de uso só existem nos planos de assinatura do Claude, não com chave de API.
+    `captured_at` é o horário atual em segundos. Os dados de uso só existem nos planos de assinatura do Claude, não com chave de API. A linha de uso também chega após cada chamada de subagente, então o assistente vê o uso subir durante um turno longo.
 - **Codex CLI** grava o uso no próprio log de sessão, que o lembrete lê. Não é preciso configurar nada.
 - **As outras ferramentas** não expõem o uso, então o lembrete diz `Usage: unknown`. Nesse caso, o assistente roda no máximo 2 a 3 tarefas ao mesmo tempo e pergunta a você antes de rodar mais de 5.
 

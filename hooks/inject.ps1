@@ -1,9 +1,11 @@
 # Unlazier context hook for Windows.
 #
-# Usage: inject.ps1 <harness> <prompt|compact>
+# Usage: inject.ps1 <harness> <prompt|compact|subagent>
 #   prompt   prints the short reminder and the usage line; runs on every user prompt.
 #   compact  prints the core principles, the reminder, and the usage line; runs after
 #            context compaction, when the original instructions may have been summarized away.
+#   subagent prints only the usage line, as Claude Code PostToolUse context; runs after each
+#            subagent call, so a long turn sees usage change between prompts.
 #
 # Rules loaded at session start lose weight as the context window fills, so the harness
 # calls this hook to place a compact copy near the end of the context. Installed at
@@ -329,6 +331,10 @@ function Get-Context {
         'compact' {
             $text = (Read-PayloadText 'AGENTS.md') + "`n" + (Read-PayloadText 'reminder.md') + (Get-UsageLine $Harness) + "`n"
         }
+        'subagent' {
+            # The reminder already arrived with the prompt; only the usage may have changed.
+            $text = (Get-UsageLine $Harness) + "`n"
+        }
         default {
             return $null
         }
@@ -367,10 +373,17 @@ function ConvertTo-JsonString {
 # Each harness expects its own output shape; see the adapter table in README.md. The JSON is
 # laid out exactly as jq prints it.
 function Format-HookOutput {
-    param([string]$Harness, [string]$Context)
+    param([string]$Harness, [string]$EventName, [string]$Context)
     $value = ConvertTo-JsonString $Context
     switch ($Harness) {
-        { $_ -in @('claude', 'codex', 'kiro', 'opencode', 'amp') } {
+        'claude' {
+            if ($EventName -eq 'subagent') {
+                # After a tool call, Claude Code passes hook output to the model only as JSON.
+                return "{`n  `"hookSpecificOutput`": {`n    `"hookEventName`": `"PostToolUse`",`n    `"additionalContext`": $value`n  }`n}`n"
+            }
+            return $Context + "`n"
+        }
+        { $_ -in @('codex', 'kiro', 'opencode', 'amp') } {
             return $Context + "`n"
         }
         'gemini' {
@@ -391,17 +404,21 @@ function Format-HookOutput {
 function Invoke-Main {
     param([string[]]$Arguments)
     if ($Arguments.Count -ne 2) {
-        [Console]::Error.WriteLine('Usage: inject.ps1 <harness> <prompt|compact>')
+        [Console]::Error.WriteLine('Usage: inject.ps1 <harness> <prompt|compact|subagent>')
         exit 2
     }
     $harness = $Arguments[0]
     $eventName = $Arguments[1]
-    $context = Get-Context $harness $eventName
-    if ($null -eq $context) {
-        [Console]::Error.WriteLine("inject.ps1: unknown event '$eventName' (expected prompt or compact)")
+    if ($eventName -eq 'subagent' -and $harness -ne 'claude') {
+        [Console]::Error.WriteLine('inject.ps1: the subagent event is only for claude')
         exit 2
     }
-    $output = Format-HookOutput $harness $context
+    $context = Get-Context $harness $eventName
+    if ($null -eq $context) {
+        [Console]::Error.WriteLine("inject.ps1: unknown event '$eventName' (expected prompt, compact, or subagent)")
+        exit 2
+    }
+    $output = Format-HookOutput $harness $eventName $context
     if ($null -eq $output) {
         [Console]::Error.WriteLine("inject.ps1: unknown harness '$harness'")
         exit 1

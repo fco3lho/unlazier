@@ -156,6 +156,8 @@ test_install_adds_all_layers() {
         '[.hooks.UserPromptSubmit[].hooks[].command] | any(contains("inject.sh\" claude prompt"))'
     check "Claude compaction hook" json_has "$home/.claude/settings.json" \
         '.hooks.SessionStart | any(.matcher == "compact")'
+    check "Claude subagent usage hook" json_has "$home/.claude/settings.json" \
+        '.hooks.PostToolUse | any(.matcher == "Agent" and (.hooks | any(.command | contains("inject.sh\" claude subagent"))))'
     check "Claude status line installed" json_has "$home/.claude/settings.json" \
         '.statusLine.command | contains("claude-statusline.sh")'
     check "Claude status line refreshes every minute" json_has "$home/.claude/settings.json" \
@@ -219,6 +221,8 @@ test_reinstall_is_idempotent() {
     check "one block in Codex AGENTS.md" has_one_block "$home/.codex/AGENTS.md"
     check "one Claude prompt hook" json_has "$home/.claude/settings.json" \
         '[.hooks.UserPromptSubmit[].hooks[] | select(.command | contains("unlazier"))] | length == 1'
+    check "one Claude subagent usage hook" json_has "$home/.claude/settings.json" \
+        '[.hooks.PostToolUse[].hooks[] | select(.command | contains("unlazier"))] | length == 1'
     check "one Claude end-of-turn alert" has_alert_hook "$home/.claude/settings.json" Stop
     check "one Codex end-of-turn alert" has_alert_hook "$home/.codex/hooks.json" Stop
     check "one Codex prompt hook" json_has "$home/.codex/hooks.json" \
@@ -388,6 +392,9 @@ test_inject_usage_lines() {
 
     check "Claude usage line" test "$(last_line bash "$home/.claude/unlazier/inject.sh" claude prompt)" \
         = "Usage: 5h 24% | weekly unknown (source: Claude Code status line, 2 min old)"
+    check "Claude subagent context is only the usage line" json_has <(bash "$home/.claude/unlazier/inject.sh" claude subagent) \
+        '.hookSpecificOutput == {hookEventName: "PostToolUse",
+            additionalContext: "Usage: 5h 24% | weekly unknown (source: Claude Code status line, 2 min old)"}'
     check "Codex usage line" test "$(last_line bash "$home/.codex/unlazier/inject.sh" codex prompt)" \
         = "Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old)"
     check "Kiro usage unknown" test "$(last_line bash "$home/.kiro/unlazier/inject.sh" kiro prompt)" \
@@ -473,20 +480,26 @@ test_inject_output_formats() {
     check "Cline output is JSON" json_has <(bash "$home/Documents/Cline/unlazier/inject.sh" cline prompt) \
         '.contextModification | startswith("Unlazier rules")'
     check "unknown event fails" test "$(bash "$home/.claude/unlazier/inject.sh" claude other >/dev/null 2>&1; echo $?)" = "2"
+    check "subagent event fails outside Claude" \
+        test "$(bash "$home/.gemini/unlazier/inject.sh" gemini subagent >/dev/null 2>&1; echo $?)" = "2"
 }
 
 test_upgrade_removes_obsolete_payload() {
-    local home
+    local home output
     echo "install removes obsolete payload files"
     home="$(new_home)"
     mkdir -p "$home/.claude/unlazier"
     printf 'old\n' > "$home/.claude/unlazier/wait-usage.sh"
     printf 'old\n' > "$home/.claude/unlazier/wait-usage.ps1"
-    run_installer "$home" --harness claude >/dev/null 2>&1
+    printf 'keep\n' > "$home/.claude/unlazier/other.txt"
+    output="$(run_installer "$home" --harness claude 2>&1)"
 
     check "obsolete shell waiter removed" file_absent "$home/.claude/unlazier/wait-usage.sh"
     check "obsolete PowerShell waiter removed" file_absent "$home/.claude/unlazier/wait-usage.ps1"
-    check "current payload kept" test -x "$home/.claude/unlazier/inject.sh"
+    check "other files in the folder kept" test -f "$home/.claude/unlazier/other.txt"
+    check "open sessions told to restart" test -n "$(printf '%s' "$output" | grep 'restart sessions opened before')"
+    output="$(run_installer "$home" --harness claude 2>&1)"
+    check "no restart notice without waiters" test -z "$(printf '%s' "$output" | grep 'restart sessions opened before')"
 }
 
 test_statusline_saves_usage() {
