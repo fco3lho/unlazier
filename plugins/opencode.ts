@@ -17,6 +17,11 @@ import { fileURLToPath } from "node:url"
 const PAYLOAD_DIR = fileURLToPath(new URL("../unlazier/", import.meta.url))
 const SCRIPT_TIMEOUT_MILLISECONDS = 5000
 const IS_WINDOWS = process.platform === "win32"
+// On Windows, Node looks for a bare command name in the current folder (the user's project)
+// before PATH, so a repository could ship its own powershell.exe; the full path rules that out.
+const WINDOWS_POWERSHELL = process.env.SystemRoot
+    ? `${process.env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+    : "powershell.exe"
 
 // V1 names a question "question.asked" and V2 a "form.created"; older V1 builds name a
 // permission prompt "permission.updated".
@@ -24,7 +29,7 @@ const ALERT_EVENTS = new Set(["permission.asked", "permission.updated", "questio
 
 function scriptCommand(name: "inject" | "alert", args: string[]): [string, string[]] {
     if (IS_WINDOWS) {
-        return ["powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", `${PAYLOAD_DIR}${name}.ps1`, ...args]]
+        return [WINDOWS_POWERSHELL, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", `${PAYLOAD_DIR}${name}.ps1`, ...args]]
     }
     return ["bash", [`${PAYLOAD_DIR}${name}.sh`, ...args]]
 }

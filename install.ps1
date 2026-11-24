@@ -197,11 +197,22 @@ param(
         return (Test-Path -LiteralPath (Get-HarnessHome $Name) -PathType Container)
     }
 
+    # cmd.exe, which runs Codex hooks, looks for a bare "powershell" in the current folder (the
+    # project) before PATH, so a repository could ship its own; the full path rules that out.
+    # SystemRoot is missing only outside Windows, where the tests run.
+    function Get-PowerShellPath {
+        $systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot')
+        if ([string]::IsNullOrEmpty($systemRoot)) {
+            return 'powershell'
+        }
+        return [System.IO.Path]::Combine($systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') -replace '\\', '/'
+    }
+
     # Forward slashes work in every shell that runs hooks on Windows: Git Bash (Claude Code),
     # cmd.exe (Codex), and PowerShell (Gemini CLI).
     function Get-ScriptCommand {
         param([string]$ScriptPath, [string]$Arguments)
-        $command = 'powershell -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f ($ScriptPath -replace '\\', '/')
+        $command = '{0} -NoProfile -ExecutionPolicy Bypass -File "{1}"' -f (Get-PowerShellPath), ($ScriptPath -replace '\\', '/')
         if ($Arguments) {
             $command = "$command $Arguments"
         }

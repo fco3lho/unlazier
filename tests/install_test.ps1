@@ -339,6 +339,52 @@ function Test-InstallAddsAllLayers {
     }
 }
 
+function Get-AllHookCommands {
+    param($Document)
+    return @($Document.hooks.PSObject.Properties | ForEach-Object { $_.Value } | ForEach-Object { $_.hooks } |
+        ForEach-Object { $_.command })
+}
+
+function Test-AllStartWith {
+    param([string[]]$Commands, [string]$Prefix)
+    return $Commands.Count -gt 0 -and @($Commands | Where-Object { -not $_.StartsWith($Prefix) }).Count -eq 0
+}
+
+# cmd.exe, which runs Codex hooks, looks for a bare "powershell" in the project folder before
+# PATH. SystemRoot is set on Windows; elsewhere the test sets one to see the path it builds.
+function Test-HookCommandsUseFullPowerShellPath {
+    Write-Host 'hook commands start Windows PowerShell by its full path'
+    $testHome = New-TestHome
+    $systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot')
+    $isSystemRootMissing = [string]::IsNullOrEmpty($systemRoot)
+    if ($isSystemRootMissing) {
+        $systemRoot = 'C:\Windows'
+        [Environment]::SetEnvironmentVariable('SystemRoot', $systemRoot)
+    }
+    try {
+        [void](Invoke-Installer $testHome @('-Harness', 'claude,codex'))
+    } finally {
+        if ($isSystemRootMissing) {
+            [Environment]::SetEnvironmentVariable('SystemRoot', $null)
+        }
+    }
+    $prefix = ($systemRoot -replace '\\', '/') + '/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile '
+    $claudeSettings = Read-TestJson (Join-TestPath $testHome '.claude/settings.json')
+
+    Assert-That 'Claude hooks use the full path' { Test-AllStartWith (Get-AllHookCommands $claudeSettings) $prefix }
+    Assert-That 'Claude status line uses the full path' { $claudeSettings.statusLine.command.StartsWith($prefix) }
+    Assert-That 'Codex hooks use the full path' {
+        Test-AllStartWith (Get-AllHookCommands (Read-TestJson (Join-TestPath $testHome '.codex/hooks.json'))) $prefix
+    }
+    if ($isSystemRootMissing) {
+        $plainHome = New-TestHome
+        [void](Invoke-Installer $plainHome @('-Harness', 'codex'))
+        Assert-That 'without SystemRoot the hooks fall back to powershell' {
+            Test-AllStartWith (Get-AllHookCommands (Read-TestJson (Join-TestPath $plainHome '.codex/hooks.json'))) 'powershell -NoProfile '
+        }
+    }
+}
+
 function Test-ReinstallIsIdempotent {
     Write-Host 'reinstalling keeps a single copy'
     $testHome = New-TestHome
@@ -835,6 +881,7 @@ foreach ($name in $IsolatedVariables) {
 try {
     Test-InstallPreservesUserContent
     Test-InstallAddsAllLayers
+    Test-HookCommandsUseFullPowerShellPath
     Test-ReinstallIsIdempotent
     Test-UninstallRestoresOriginalFiles
     Test-V1LeftoversRemovedWithYes
