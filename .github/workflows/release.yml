@@ -1,0 +1,29 @@
+name: release
+
+on:
+    release:
+        types: [published]
+
+# Uploading assets to the release needs write access, so only this workflow gets it.
+permissions:
+    contents: write
+
+jobs:
+    assets:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+              with:
+                  ref: ${{ github.event.release.tag_name }}
+                  persist-credentials: false
+            # The tag reaches the shell through the environment, never through an inline
+            # expression, so a tag name cannot inject commands.
+            - name: Build the release assets
+              env:
+                  TAG: ${{ github.event.release.tag_name }}
+              run: bash scripts/build-release-assets.sh "$TAG" dist
+            - name: Upload the release assets
+              env:
+                  TAG: ${{ github.event.release.tag_name }}
+                  GH_TOKEN: ${{ github.token }}
+              run: gh release upload "$TAG" dist/* --clobber
