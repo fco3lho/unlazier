@@ -5,7 +5,8 @@
 #   compact  prints the core principles, the reminder, and the usage line; runs after
 #            context compaction, when the original instructions may have been summarized away.
 #   subagent prints only the usage line, as Claude Code or Codex PostToolUse context; runs after
-#            each subagent call, so a long turn sees usage change between prompts.
+#            each subagent call, so a long turn sees usage change between prompts. Prints nothing
+#            after a Claude Code subagent launched in the background.
 #   dispatch denies a Claude Code or Codex subagent call while the usage ladder forbids
 #            subagents (5-hour window at 85% or more, weekly at 99% or more) and prints nothing
 #            otherwise.
@@ -22,7 +23,16 @@ Set-StrictMode -Version 2.0
 $ScriptDirectory = $PSScriptRoot
 $HarnessHome = Split-Path -Parent $ScriptDirectory
 $MaxReadingAgeSeconds = 900
+# A reading further ahead than this (milliseconds instead of seconds, or a wrong clock) would never
+# go stale, so it counts as stale at once.
+$MaxClockSkewSeconds = 300
 $MaxSectionTitles = 12
+$MaxTitleCharacters = 60
+$MaxTitleListCharacters = 400
+$MaxProjectRulesBytes = 65536
+# Control characters and the bidirectional controls U+202A-U+202E and U+2066-U+2069, built from
+# code points so that this file stays ASCII.
+$HiddenTitleCharacters = '[\p{Cc}' + [char]0x202A + '-' + [char]0x202E + [char]0x2066 + '-' + [char]0x2069 + ']'
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 # Opens the file with FileShare.ReadWrite because Codex keeps its session log open for
@@ -37,6 +47,24 @@ function Read-SharedText {
         } finally {
             $reader.Dispose()
         }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+# Reads at most the first $MaxBytes bytes, as head -c does in inject.sh. Like jq there, the decoder
+# keeps a byte order mark as text and turns invalid or cut UTF-8 sequences into U+FFFD.
+function Read-SharedTextPrefix {
+    param([string]$Path, [int]$MaxBytes)
+    $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+    try {
+        $buffer = New-Object byte[] $MaxBytes
+        $count = 0
+        do {
+            $read = $stream.Read($buffer, $count, $MaxBytes - $count)
+            $count += $read
+        } while ($read -gt 0 -and $count -lt $MaxBytes)
+        return $Utf8NoBom.GetString($buffer, 0, $count)
     } finally {
         $stream.Dispose()
     }
@@ -84,13 +112,14 @@ function Test-Number {
     return ($Value -is [int]) -or ($Value -is [long]) -or ($Value -is [double]) -or ($Value -is [decimal])
 }
 
-# A window counts only while its reset time is still in the future.
+# A window counts only while its reset time is still in the future; a reset time that is not a
+# number counts as missing, as in inject.sh.
 function Get-LivePercent {
     param($Percent, $ResetsAt, [double]$Now)
     if (-not (Test-Number $Percent)) {
         return $null
     }
-    if ($null -eq $ResetsAt) {
+    if (-not (Test-Number $ResetsAt)) {
         $ResetsAt = $Now + 1
     }
     if ([double]$ResetsAt -gt $Now) {
@@ -105,7 +134,13 @@ function Read-ClaudeUsage {
     if (-not (Test-Path -LiteralPath $stateFile -PathType Leaf)) {
         return $null
     }
-    $state = (Read-SharedText $stateFile) | ConvertFrom-Json
+    $text = Read-SharedText $stateFile
+    # Only a single JSON object is a reading, as in inject.sh. PowerShell 7 unwraps a one-element
+    # array into its element, so the text tells an object from an array.
+    if ($text -notmatch '^[ \t\r\n]*\{') {
+        return $null
+    }
+    $state = $text | ConvertFrom-Json
     $fiveHour = Get-JsonProperty $state 'five_hour'
     $sevenDay = Get-JsonProperty $state 'seven_day'
     $capturedAt = Get-JsonProperty $state 'captured_at'
@@ -228,6 +263,12 @@ function Read-Usage {
     }
 }
 
+function Test-StaleReading {
+    param($CapturedAt, [double]$Now)
+    return $null -eq $CapturedAt -or ($Now - $CapturedAt) -gt $MaxReadingAgeSeconds -or
+        ($CapturedAt - $Now) -gt $MaxClockSkewSeconds
+}
+
 function Get-UsageLine {
     param([string]$Harness)
     $now = Get-UnixTimeNow
@@ -240,7 +281,7 @@ function Get-UsageLine {
     if ($null -eq $reading) {
         return 'Usage: unknown (no usage reading available)'
     }
-    if ($null -eq $reading.CapturedAt -or ($now - $reading.CapturedAt) -gt $MaxReadingAgeSeconds) {
+    if (Test-StaleReading $reading.CapturedAt $now) {
         return 'Usage: unknown (no usage reading from the last 15 minutes)'
     }
     $ageMinutes = ([long][System.Math]::Floor(($now - $reading.CapturedAt) / 60)).ToString([System.Globalization.CultureInfo]::InvariantCulture)
@@ -254,7 +295,7 @@ function Get-DispatchBlockReason {
     param([string]$Harness)
     $now = Get-UnixTimeNow
     $reading = Read-Usage $Harness $now
-    if ($null -eq $reading -or $null -eq $reading.CapturedAt -or ($now - $reading.CapturedAt) -gt $MaxReadingAgeSeconds) {
+    if ($null -eq $reading -or (Test-StaleReading $reading.CapturedAt $now)) {
         return ''
     }
     $usage = Get-UsageLine $Harness
@@ -302,29 +343,81 @@ function Find-ProjectRulesFile {
     return $null
 }
 
-# The "## " titles of a Markdown file, comma-separated, skipping fenced code blocks.
+# Removes control characters (category Cc) and bidirectional controls, trims spaces, and cuts the
+# title to $MaxTitleCharacters code points, as inject.sh does.
+function Format-SectionTitle {
+    param([string]$Text)
+    $title = ($Text -replace $HiddenTitleCharacters, '').Trim(' ')
+    $codePoints = [System.Text.Encoding]::UTF32.GetBytes($title)
+    if ($codePoints.Length -gt 4 * $MaxTitleCharacters) {
+        return [System.Text.Encoding]::UTF32.GetString($codePoints, 0, 4 * $MaxTitleCharacters) + '...'
+    }
+    return $title
+}
+
+# Keeps at most $MaxSectionTitles titles and stops before the list would pass
+# $MaxTitleListCharacters code points; ", ..." marks titles left out.
+function Join-SectionTitles {
+    param([System.Collections.Generic.List[string]]$Titles)
+    $kept = New-Object System.Collections.Generic.List[string]
+    $characters = 0
+    foreach ($title in $Titles) {
+        $length = $characters + [System.Text.Encoding]::UTF32.GetByteCount($title) / 4
+        if ($kept.Count -gt 0) {
+            $length += 2
+        }
+        if ($kept.Count -eq $MaxSectionTitles -or $length -gt $MaxTitleListCharacters) {
+            return ($kept -join ', ') + ', ...'
+        }
+        $kept.Add($title)
+        $characters = $length
+    }
+    return $kept -join ', '
+}
+
+# The "## " titles of a Markdown file, comma-separated. The file comes from the repository but
+# reaches the model as Unlazier's own text, so headings hidden from readers (in fenced code or HTML
+# comments) are skipped and titles are cleaned and capped, as in inject.sh.
 function Get-SectionTitles {
     param([string]$Path)
     $titles = New-Object System.Collections.Generic.List[string]
-    $count = 0
     $isFenced = $false
-    foreach ($line in ((Read-SharedText $Path) -split "`n")) {
-        if ($line -match '^(```|~~~)') {
-            $isFenced = -not $isFenced
+    $isCommented = $false
+    foreach ($line in ((Read-SharedTextPrefix $Path $MaxProjectRulesBytes) -split "`n")) {
+        # One title past the cap is enough to know that the list leaves some out.
+        if ($titles.Count -gt $MaxSectionTitles) {
+            break
+        }
+        if ($isFenced) {
+            $isFenced = $line -notmatch '^(```|~~~)'
             continue
         }
-        if (-not $isFenced -and $line -match '^## +(.*)$') {
-            $count++
-            if ($count -le $MaxSectionTitles) {
-                $titles.Add($Matches[1].TrimEnd(' ', "`t", "`r"))
+        if (-not $isCommented -and $line -match '^(```|~~~)') {
+            $isFenced = $true
+            continue
+        }
+        $isHeading = -not $isCommented -and $line.StartsWith('## ', [System.StringComparison]::Ordinal)
+        $visible = $line
+        if ($isCommented) {
+            if (-not $line.Contains('-->')) {
+                continue
+            }
+            $visible = $line -replace '^.*?-->', ''
+            $isCommented = $false
+        }
+        $visible = $visible -replace '<!--.*?-->', ''
+        if ($visible.Contains('<!--')) {
+            $visible = $visible -replace '<!--.*$', ''
+            $isCommented = $true
+        }
+        if ($isHeading) {
+            $title = Format-SectionTitle $visible.Substring(3)
+            if ($title -ne '') {
+                $titles.Add($title)
             }
         }
     }
-    $text = $titles -join ', '
-    if ($count -gt $MaxSectionTitles) {
-        $text += ', ...'
-    }
-    return $text
+    return Join-SectionTitles $titles
 }
 
 # The project's rules lose weight between compactions like the global ones, but repeating the
@@ -342,10 +435,11 @@ function Get-ProjectRulesLine {
     } catch [System.IO.IOException], [System.UnauthorizedAccessException] {
         $titles = ''
     }
+    $displayPath = $path -replace '\p{Cc}', ''
     if ($titles) {
-        return "- Project rules: $path apply ($titles); re-read the relevant section before acting on it.`n"
+        return "- Project rules: $displayPath apply ($titles); re-read the relevant section before acting on it.`n"
     }
-    return "- Project rules: $path apply; re-read the relevant section before acting on it.`n"
+    return "- Project rules: $displayPath apply; re-read the relevant section before acting on it.`n"
 }
 
 # Mirrors the shell version: the pieces are printed in order and command substitution
@@ -371,6 +465,22 @@ function Get-Context {
         }
     }
     return $text.TrimEnd("`n")
+}
+
+# Claude Code passes the tool call as JSON on standard input. A subagent launched in the background
+# returns at once, so a usage line after it would repeat the reading the model already has.
+function Test-BackgroundSubagent {
+    if (-not [Console]::IsInputRedirected) {
+        return $false
+    }
+    try {
+        $hookInput = [Console]::In.ReadToEnd() | ConvertFrom-Json
+    } catch {
+        # Input that is not the expected JSON keeps the usage line, as in inject.sh.
+        return $false
+    }
+    $isBackground = Get-JsonProperty (Get-JsonProperty $hookInput 'tool_input') 'run_in_background'
+    return $isBackground -is [bool] -and $isBackground
 }
 
 # Escapes a string the way jq does: control characters as \u00xx, non-ASCII left as UTF-8.
@@ -455,6 +565,9 @@ function Invoke-Main {
     if ($eventName -in @('subagent', 'dispatch') -and $harness -notin @('claude', 'codex')) {
         [Console]::Error.WriteLine("inject.ps1: the $eventName event is only for claude and codex")
         exit 2
+    }
+    if ($harness -eq 'claude' -and $eventName -eq 'subagent' -and (Test-BackgroundSubagent)) {
+        return
     }
     $context = Get-Context $harness $eventName
     if ($null -eq $context) {

@@ -4,6 +4,7 @@
 - **Edge Cases** — handle null, undefined, empty collections, boundary values, empty strings.
 - **Defensive Programming** — validate inputs, use assertions, enforce invariants.
 - **Security** — prevent injection, never hardcode secrets, follow least-privilege principle.
+- **Secret Files** — never read or print `.env` files, private keys, or credential files. Ask the user for the non-secret value you need, or let the user check it with the secret masked.
 - **No Swallowed Exceptions** — `except: pass` and empty catch blocks are forbidden.
 - **Exhaustive Branching** — `switch`/`match` must always have a `default`/exhaustive case. `if` used as a guard clause (early return or raise) does not require an `else`. Parallel `if`/`else` branches — when both paths carry distinct behavior — must handle all cases.
 

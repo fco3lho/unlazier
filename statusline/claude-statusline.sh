@@ -36,13 +36,20 @@ def window($label; $data):
 window("Session 5h"; .five_hour), window("Weekly    "; .seven_day)
 '
 
+# Two status lines can refresh at the same moment, so each writes its own temporary file and
+# moves it into place in one step.
 save_rate_limits() {
-    local rate_limits="$1"
-    local temporary_file="$STATE_FILE.tmp"
-    mkdir -p "$(dirname "$STATE_FILE")" || return 1
-    printf '%s' "$rate_limits" \
+    local rate_limits="$1" state_folder temporary_file
+    state_folder="$(dirname "$STATE_FILE")"
+    mkdir -p "$state_folder" || return 1
+    temporary_file="$(mktemp "$state_folder/.rate_limits.XXXXXX")" || return 1
+    if printf '%s' "$rate_limits" \
         | jq -c --argjson captured_at "$(date +%s)" '{captured_at: $captured_at} + .' > "$temporary_file" \
-        && mv "$temporary_file" "$STATE_FILE"
+        && mv "$temporary_file" "$STATE_FILE"; then
+        return 0
+    fi
+    rm -f "$temporary_file"
+    return 1
 }
 
 main() {

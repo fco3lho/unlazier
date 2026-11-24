@@ -8,8 +8,8 @@
     line inside that reminder. Existing user content is never replaced and no backups are made.
 
     From a clone:     .\install.ps1 [-Harness <names|all>] [-Yes] [-Uninstall]
-    Without a clone:  irm https://raw.githubusercontent.com/fco3lho/unlazier/main/install.ps1 | iex
-    With options:     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/fco3lho/unlazier/main/install.ps1))) -Harness codex
+    Without a clone:  irm https://github.com/fco3lho/unlazier/releases/latest/download/install.ps1 | iex
+    With options:     & ([scriptblock]::Create((irm https://github.com/fco3lho/unlazier/releases/latest/download/install.ps1))) -Harness codex
 
 .PARAMETER Harness
     Comma-separated names (claude,opencode,codex,copilot,gemini,amp,kiro,cline,devin) or "all".
@@ -71,7 +71,12 @@ param(
         'refactoring' = '0bf86046b84bae55f534bbf283153ece35b291f8c7bd55041171f5261f9e9315'
     }
     $V1OpenCodeConfig = '{"$schema":"https://opencode.ai/config.json","instructions":["~/.config/opencode/AGENTS.md","~/.config/opencode/rules/*.md"],"skills":{"paths":["~/.config/opencode/skills"]}}'
-    $V1GlobalHeading = '# Global Agent Rules'
+    $V1GlobalHash = 'fb4d566e0b83a9e00831f00f1339296690524b729bf38fb1d522576a3bd9222a'
+
+    # Hook entries and the status line are ours when they run one of the payload scripts, under
+    # the current folder name or the 2.0 one; a user's own path that only mentions unlazier (a
+    # fork, for example) is not.
+    $OwnedScriptPattern = '[/\\]unlazier(-ai)?[/\\]+(inject|alert|claude-statusline)\.(sh|ps1)'
 
     # Mutable run state lives in one object so functions can update it without scope modifiers.
     $State = @{
@@ -149,6 +154,16 @@ param(
         }
     }
 
+    # Hook commands carry the harness home inside double quotes, where these characters would run
+    # code or end the quoting each time the hook runs, in cmd.exe, PowerShell, or Git Bash.
+    function Assert-SafeHarnessHome {
+        param([string]$Name)
+        $harnessHome = Get-HarnessHome $Name
+        if ($harnessHome.IndexOfAny([char[]]@('"', '$', '`', '%')) -ge 0) {
+            throw "$(Get-HarnessLabel $Name): the folder $harnessHome contains a double quote, a dollar sign, a backtick, or a percent sign, which a hook command cannot carry safely; nothing was installed. Use a folder without these characters."
+        }
+    }
+
     function Get-HarnessBinaries {
         param([string]$Name)
         switch ($Name) {
@@ -197,11 +212,22 @@ param(
         return (Test-Path -LiteralPath (Get-HarnessHome $Name) -PathType Container)
     }
 
+    # cmd.exe, which runs Codex hooks, looks for a bare "powershell" in the current folder (the
+    # project) before PATH, so a repository could ship its own; the full path rules that out.
+    # SystemRoot is missing only outside Windows, where the tests run.
+    function Get-PowerShellPath {
+        $systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot')
+        if ([string]::IsNullOrEmpty($systemRoot)) {
+            return 'powershell'
+        }
+        return [System.IO.Path]::Combine($systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') -replace '\\', '/'
+    }
+
     # Forward slashes work in every shell that runs hooks on Windows: Git Bash (Claude Code),
     # cmd.exe (Codex), and PowerShell (Gemini CLI).
     function Get-ScriptCommand {
         param([string]$ScriptPath, [string]$Arguments)
-        $command = 'powershell -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f ($ScriptPath -replace '\\', '/')
+        $command = '{0} -NoProfile -ExecutionPolicy Bypass -File "{1}"' -f (Get-PowerShellPath), ($ScriptPath -replace '\\', '/')
         if ($Arguments) {
             $command = "$command $Arguments"
         }
@@ -321,24 +347,26 @@ param(
         return $document
     }
 
+    # ConvertTo-Json turns whatever lies deeper than -Depth into a string, silently on Windows
+    # PowerShell 5.1, so the depth is set well above what a hand-written config reaches.
     function Write-JsonConfig {
         param([string]$Path, $Document)
-        $json = (ConvertTo-Json -InputObject $Document -Depth 20) -replace "`r`n", "`n"
+        $json = (ConvertTo-Json -InputObject $Document -Depth 100) -replace "`r`n", "`n"
         Write-TextFile $Path ($json + "`n") $false
     }
 
     function ConvertTo-CompactJson {
         param($Document)
-        return ConvertTo-Json -InputObject $Document -Depth 20 -Compress
+        return ConvertTo-Json -InputObject $Document -Depth 100 -Compress
     }
 
     # Claude Code, Codex, Gemini CLI, and Devin share the same hook layout:
     # {"hooks": {"<Event>": [{"matcher": "...", "hooks": [{"type": "command", "command": "..."}]}]}}.
-    # Entries whose command mentions unlazier are ours; everything else is left untouched.
+    # Entries whose command matches $OwnedScriptPattern are ours; everything else is left untouched.
     function Test-OurCommand {
         param($Hook)
         $command = Get-JsonProperty $Hook 'command'
-        return ($null -ne $command) -and ([string]$command).Contains('unlazier')
+        return ($null -ne $command) -and [regex]::IsMatch([string]$command, $OwnedScriptPattern)
     }
 
     # With a matcher, only entries for that matcher lose our commands, because one event can carry
@@ -447,7 +475,7 @@ param(
         Remove-OurHooks $document
         if ($IncludeStatusLine) {
             $statusCommand = Get-JsonProperty (Get-JsonProperty $document 'statusLine') 'command'
-            if ($null -ne $statusCommand -and ([string]$statusCommand).Contains('unlazier')) {
+            if ($null -ne $statusCommand -and [regex]::IsMatch([string]$statusCommand, $OwnedScriptPattern)) {
                 $document.PSObject.Properties.Remove('statusLine')
             }
         }
@@ -684,43 +712,68 @@ param(
         return $builder.ToString()
     }
 
-    function Test-HasMarker {
-        param([string]$Text, [string]$Start = $MarkerStart)
+    # A block runs from a start marker line to the next end marker line. A start marker followed
+    # by another start marker, or by none, opens no block: it stays as text, with the user's lines
+    # after it, which a broken block would otherwise swallow up to the end of the file.
+
+    # Counts the blocks and the start markers that open none.
+    function Get-MarkerCounts {
+        param([string]$Text, [string]$Start, [string]$End)
+        $blocks = 0
+        $unclosed = 0
+        $isOpen = $false
         foreach ($line in ($Text -split "`n")) {
-            if ($line.TrimEnd("`r") -eq $Start) {
-                return $true
+            $bareLine = $line.TrimEnd("`r")
+            if ($bareLine -eq $Start) {
+                if ($isOpen) {
+                    $unclosed++
+                }
+                $isOpen = $true
+            } elseif ($isOpen -and $bareLine -eq $End) {
+                $blocks++
+                $isOpen = $false
             }
         }
-        return $false
+        if ($isOpen) {
+            $unclosed++
+        }
+        return [pscustomobject]@{ Blocks = $blocks; Unclosed = $unclosed }
     }
 
-    # Replaces the lines from the start marker to the end marker with $Block, or drops them when
-    # $Block is $null. Every other line keeps its exact bytes, including CRLF endings.
+    # Replaces each block with $Block, or drops it when $Block is $null. Every other line keeps
+    # its exact bytes, including CRLF endings.
     function Set-MarkedBlock {
         param([string]$Text, $Block, [string]$Start = $MarkerStart, [string]$End = $MarkerEnd)
         $result = New-Object System.Collections.Generic.List[string]
-        $isSkipping = $false
+        # Lines from a start marker on, held until an end marker shows they form a block.
+        $held = New-Object System.Collections.Generic.List[string]
         foreach ($line in ($Text -split "`n")) {
             $bareLine = $line.TrimEnd("`r")
-            if ($isSkipping) {
-                if ($bareLine -eq $End) {
-                    $isSkipping = $false
-                }
-                continue
-            }
             if ($bareLine -eq $Start) {
+                $result.AddRange($held)
+                $held.Clear()
+                $held.Add($line)
+            } elseif ($held.Count -gt 0 -and $bareLine -eq $End) {
+                $held.Clear()
                 if ($null -ne $Block) {
                     $result.Add($Block)
                 }
-                $isSkipping = $true
-                continue
+            } elseif ($held.Count -gt 0) {
+                $held.Add($line)
+            } else {
+                $result.Add($line)
             }
-            $result.Add($line)
         }
+        $result.AddRange($held)
         return ($result -join "`n")
     }
 
-    # Replaces the block between the markers, or appends it when the file has none.
+    function Add-UnclosedMarkerNotice {
+        param([string]$Path, [string]$Start, [string]$End)
+        Add-Notice "$Path has a '$Start' line with no '$End' line after it; that line and the text after it were kept. Delete the stray line by hand."
+    }
+
+    # Replaces the block, or appends one when the file has none.
     function Write-RulesBlock {
         param([string]$Path)
         $block = $MarkerStart + "`n" + (Get-RulesText) + $MarkerEnd
@@ -729,7 +782,11 @@ param(
             return
         }
         $file = Read-TextFile $Path
-        if (Test-HasMarker $file.Text) {
+        $counts = Get-MarkerCounts $file.Text $MarkerStart $MarkerEnd
+        if ($counts.Unclosed -gt 0) {
+            Add-UnclosedMarkerNotice $Path $MarkerStart $MarkerEnd
+        }
+        if ($counts.Blocks -gt 0) {
             Write-TextFile $Path (Set-MarkedBlock $file.Text $block) $file.HasBom
             return
         }
@@ -749,7 +806,11 @@ param(
             return
         }
         $file = Read-TextFile $Path
-        if (-not (Test-HasMarker $file.Text $Start)) {
+        $counts = Get-MarkerCounts $file.Text $Start $End
+        if ($counts.Unclosed -gt 0) {
+            Add-UnclosedMarkerNotice $Path $Start $End
+        }
+        if ($counts.Blocks -eq 0) {
             return
         }
         $remaining = Set-MarkedBlock $file.Text $null $Start $End
@@ -821,8 +882,9 @@ param(
     }
 
     # Removes what version 2.0 installed under its old name, so it does not load next to the
-    # renamed files. Hook entries, the status line, and rule files need nothing extra: their
-    # names contain "unlazier", which matches both names.
+    # renamed files. Hook entries and the status line need nothing extra, because
+    # $OwnedScriptPattern matches both folder names, and neither do rule files, because
+    # 'unlazier*.md' matches both prefixes.
     function Remove-LegacyNames {
         param([string]$Name)
         $harnessHome = Get-HarnessHome $Name
@@ -882,21 +944,36 @@ param(
     # Version 1 leftovers (Claude Code and OpenCode only).
     # -----------------------------------------------------------------------
 
-    function Get-NormalizedHash {
-        param([string]$Path)
-        $text = (Read-TextFile $Path).Text -replace "`r`n", "`n"
+    function Get-TextHash {
+        param([string]$Text)
         $algorithm = [System.Security.Cryptography.SHA256]::Create()
         try {
-            $hash = $algorithm.ComputeHash($Utf8NoBom.GetBytes($text))
+            $hash = $algorithm.ComputeHash($Utf8NoBom.GetBytes($Text))
         } finally {
             $algorithm.Dispose()
         }
         return (($hash | ForEach-Object { $_.ToString('x2') }) -join '')
     }
 
+    function Get-NormalizedText {
+        param([string]$Path)
+        return (Read-TextFile $Path).Text -replace "`r`n", "`n"
+    }
+
     function Test-HashMatch {
         param([string]$Path, [string]$Expected)
-        return (Test-Path -LiteralPath $Path -PathType Leaf) -and ((Get-NormalizedHash $Path) -eq $Expected)
+        return (Test-Path -LiteralPath $Path -PathType Leaf) -and ((Get-TextHash (Get-NormalizedText $Path)) -eq $Expected)
+    }
+
+    # Version 1 made the rules/ paths in the Claude Code copy absolute; they are made relative
+    # again so the copy matches the hash of the shipped file.
+    function Test-V1GlobalFile {
+        param([string]$Path)
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            return $false
+        }
+        $text = (Get-NormalizedText $Path) -replace '`[^`]*/\.claude/rules/', '`rules/'
+        return (Get-TextHash $text) -eq $V1GlobalHash
     }
 
     function Test-V1OpenCodeConfig {
@@ -926,12 +1003,8 @@ param(
         if ($Name -eq 'claude') {
             $globalFile = [System.IO.Path]::Combine($harnessHome, 'CLAUDE.md')
         }
-        if (Test-Path -LiteralPath $globalFile -PathType Leaf) {
-            $text = (Read-TextFile $globalFile).Text
-            $firstLine = ($text -split "`n")[0].TrimEnd("`r")
-            if ($firstLine -eq $V1GlobalHeading -and -not (Test-HasMarker $text)) {
-                $leftovers.Add($globalFile)
-            }
+        if (Test-V1GlobalFile $globalFile) {
+            $leftovers.Add($globalFile)
         }
 
         foreach ($ruleName in $V1RuleHashes.Keys) {
@@ -1193,6 +1266,9 @@ param(
             }
         } else {
             try {
+                foreach ($name in $harnesses) {
+                    Assert-SafeHarnessHome $name
+                }
                 Initialize-Source
                 $leftovers = New-Object System.Collections.Generic.List[string]
                 foreach ($name in $harnesses) {

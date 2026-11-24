@@ -2,6 +2,35 @@
 
 All notable changes to Unlazier (called Unlazier AI before version 2.1) are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [2.4.0] - 2026-11-24
+
+### Added
+
+- **Release assets:** each release publishes `install.sh`, `install.ps1`, `uninstall.sh`, and `uninstall.ps1` with every download pinned to the release tag, plus a `SHA256SUMS` file. The README now installs from `releases/latest/download` and shows how to check a script before running it, so a push to `main` can no longer change or mix what you install.
+- **Secret Files rule:** never read or print `.env` files, private keys, or credential files; ask for the non-secret value, or let the user check it with the secret masked.
+
+### Changed
+
+- **Project rules line:** headings inside HTML comments are no longer listed, control and bidirectional characters are removed from titles and from the path, each title is cut to 60 characters, the list stops at 12 titles or 400 characters, and only the first 64 KiB of the file is read. A repository can no longer slip hidden instructions or thousands of characters into every prompt through its headings.
+- No usage line is added after a background Claude Code subagent, which returns at once with the same reading.
+- The Codex usage hook reads only the newest `token_count` events: with a 60 MB session log, a prompt went from 631 to 59 ms.
+- Rules: what to do about test-first when a project has no tests, what "impossible scenarios" means next to "validate inputs", execution instructions only for new projects and modules, and only the `Usage:` line from Unlazier counts.
+- On Windows, hook commands start PowerShell by its full path. Codex users approve the changed hooks once more with `/hooks`.
+- Installing refuses a tool folder whose path holds characters a hook command cannot carry safely: `$`, backtick, `"`, and `\` (Windows: `"`, `$`, backtick, and `%`).
+- The version 1 instructions file is recognized only while it is exactly the file version 1 wrote.
+- CI runs with a read-only token and with `actions/checkout` v5.1.0 pinned to its commit.
+
+### Fixed
+
+- A malformed usage file blocked every Claude Code prompt, because the hook exited with code 2. The reading now counts as unknown.
+- A usage reading dated in the future never went stale and kept driving the subagent gate; it now counts as stale.
+- On Windows, a repository could ship a `powershell.bat` that ran on every prompt, because hook commands named PowerShell without a path.
+- Installing changed the files it edits: a `settings.json` with mode 600 became 644, and a symlinked config became a plain file. Mode, owner, and symlinks are now kept.
+- Uninstalling removed a user's own hooks or status line whose path merely contained "unlazier".
+- A start marker without an end marker made installing wipe the rest of the file. The text is now kept, the block goes at the end, and you get a notice.
+- Temporary files have unique names, so two status lines refreshing at once no longer collide.
+- Windows PowerShell 5.1 flattened settings nested deeper than 20 levels.
+
 ## [2.3.0] - 2026-11-24
 
 ### Added

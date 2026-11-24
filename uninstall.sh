@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./uninstall.sh [--harness <names|all>] [--yes]
-#   curl -fsSL https://raw.githubusercontent.com/fco3lho/unlazier/main/uninstall.sh | bash
+#   curl -fsSL https://github.com/fco3lho/unlazier/releases/latest/download/uninstall.sh | bash
 #
 # Removes only what Unlazier added; everything else in each tool's configuration stays.
 # The work is done by install.sh in uninstall mode, so both share one harness table.

@@ -6,7 +6,8 @@
 #   compact  prints the core principles, the reminder, and the usage line; runs after
 #            context compaction, when the original instructions may have been summarized away.
 #   subagent prints only the usage line, as Claude Code or Codex PostToolUse context; runs after
-#            each subagent call, so a long turn sees usage change between prompts.
+#            each subagent call, so a long turn sees usage change between prompts. Prints nothing
+#            after a Claude Code subagent launched in the background.
 #   dispatch denies a Claude Code or Codex subagent call while the usage ladder forbids
 #            subagents (5-hour window at 85% or more, weekly at 99% or more) and prints nothing
 #            otherwise.
@@ -20,38 +21,83 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_HOME="$(dirname "$SCRIPT_DIR")"
 MAX_READING_AGE_SECONDS=900
+# A reading further ahead than this (milliseconds instead of seconds, or a wrong clock) would never
+# go stale, so it counts as stale at once.
+MAX_CLOCK_SKEW_SECONDS=300
 MAX_SECTION_TITLES=12
+MAX_TITLE_CHARACTERS=60
+MAX_TITLE_LIST_CHARACTERS=400
+MAX_PROJECT_RULES_BYTES=65536
 
-# The "## " titles of a Markdown file, comma-separated, skipping fenced code blocks.
-# shellcheck disable=SC2016  # awk program, not a shell expansion
-SECTION_TITLES_PROGRAM='
-/^(```|~~~)/ { fenced = !fenced; next }
-!fenced && /^## / {
-    title = $0
-    sub(/^## +/, "", title)
-    sub(/[ \t\r]+$/, "", title)
-    count++
-    if (count <= max) titles = titles (count > 1 ? ", " : "") title
-}
-END { if (count > max) titles = titles ", ..."; print titles }
+# The project rules line, from the "## " titles of a Markdown file read on standard input. The file
+# comes from the repository but reaches the model as Unlazier's own text, so headings hidden from
+# readers (in fenced code or HTML comments) are skipped, control and bidirectional characters are
+# removed, and titles and their list are capped. Lengths count code points, as in inject.ps1.
+# shellcheck disable=SC2016  # jq program, not a shell expansion
+PROJECT_RULES_PROGRAM='
+def fence: startswith("```") or startswith("~~~");
+# The part of a line outside HTML comments, and whether a comment is still open at its end.
+def outside_comments($commented):
+    if $commented then
+        if index("-->") != null then sub("^.*?-->"; "") | outside_comments(false) else {text: "", commented: true} end
+    elif index("<!--") != null then
+        gsub("<!--.*?-->"; "")
+        | if index("<!--") != null then {text: sub("<!--.*$"; ""), commented: true} else {text: ., commented: false} end
+    else {text: ., commented: false} end;
+# Code points of category Cc, and the bidirectional controls U+202A-U+202E and U+2066-U+2069.
+def control: . < 32 or (. >= 127 and . < 160);
+def bidirectional: (. >= 8234 and . <= 8238) or (. >= 8294 and . <= 8297);
+def title: .[3:] | explode | map(select(control or bidirectional | not))
+    | until(length == 0 or .[0] != 32; .[1:]) | until(length == 0 or .[-1] != 32; .[:-1])
+    | if length > $max_title then (.[:$max_title] | implode) + "..." else implode end;
+# One title past the cap is enough to know that the list leaves some out.
+(reduce inputs as $line ({fenced: false, commented: false, titles: []};
+    if (.titles | length) > $max_titles then .
+    elif .fenced then .fenced = ($line | fence | not)
+    elif (.commented | not) and ($line | fence) then .fenced = true
+    else .commented as $commented
+        | ($line | outside_comments($commented)) as $visible
+        | .commented = $visible.commented
+        | if ($commented | not) and ($line | startswith("## ")) then
+            .titles += [$visible.text | title | select(. != "")]
+          else . end
+    end).titles
+    | reduce .[] as $title ({titles: [], characters: 0, omitted: false};
+        (.characters + (if .titles == [] then 0 else 2 end) + ($title | length)) as $characters
+        | if .omitted then .
+          elif (.titles | length) == $max_titles or $characters > $max_characters then .omitted = true
+          else .titles += [$title] | .characters = $characters end)
+    | (.titles | join(", ")) + (if .omitted then ", ..." else "" end)) as $titles
+| ($path | explode | map(select(control | not)) | implode) as $file
+| if $titles == "" then "- Project rules: \($file) apply; re-read the relevant section before acting on it."
+    else "- Project rules: \($file) apply (\($titles)); re-read the relevant section before acting on it." end
 '
 
-# Normalized usage reading: {"five_hour": <percent|null>, "weekly": <percent|null>, "captured_at": <epoch>}.
-# A window counts only while its reset time is still in the future.
+# Normalized usage reading: {"five_hour": <percent|null>, "weekly": <percent|null>, "captured_at": <epoch|null>}.
+# A window counts only while its reset time is still in the future. A field that is not a number
+# counts as missing, so a damaged reading becomes unknown usage instead of a jq error. The Claude
+# file is slurped so that anything but a single JSON object is rejected.
 # shellcheck disable=SC2016  # jq programs, not shell expansions
 CLAUDE_USAGE_PROGRAM='
-def live($window): if $window.used_percentage != null and (($window.resets_at // now + 1) > now)
-    then $window.used_percentage else null end;
-{five_hour: live(.five_hour // {}), weekly: live(.seven_day // {}), captured_at: .captured_at}
+def number: if type == "number" then . else null end;
+def live: if type != "object" then null
+    else (.used_percentage | number) as $percent
+        | if $percent != null and (((.resets_at | number) // now + 1) > now) then $percent else null end
+    end;
+if length == 1 and (.[0] | type) == "object" then
+    .[0] | {five_hour: (.five_hour | live), weekly: (.seven_day | live), captured_at: (.captured_at | number)}
+else error("the usage file is not one JSON object") end
 '
 
 # shellcheck disable=SC2016
 CODEX_USAGE_PROGRAM='
+def number: if type == "number" then . else null end;
 def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
 (.timestamp | epoch) as $captured_at
-| [.payload.rate_limits.primary, .payload.rate_limits.secondary] | map(select(. != null))
-| map(. + {resets_epoch: (.resets_at // (if .resets_in_seconds != null then $captured_at + .resets_in_seconds else null end))})
-| def pick($minutes): (map(select(.window_minutes == $minutes and .used_percent != null
+| [.payload.rate_limits.primary, .payload.rate_limits.secondary] | map(objects)
+| map(. + {resets_epoch: ((.resets_at | number)
+    // (if (.resets_in_seconds | number) != null then $captured_at + .resets_in_seconds else null end))})
+| def pick($minutes): (map(select(.window_minutes == $minutes and (.used_percent | number) != null
         and ((.resets_epoch // now + 1) > now))) | first | .used_percent) // null;
 {five_hour: pick(300), weekly: pick(10080), captured_at: $captured_at}
 '
@@ -59,7 +105,7 @@ def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
 # shellcheck disable=SC2016
 FORMAT_USAGE_PROGRAM='
 def percent: if . == null then "unknown" else "\(. + 0.5 | floor)%" end;
-if .captured_at == null or (now - .captured_at) > $max_age then
+if .captured_at == null or (now - .captured_at) > $max_age or (.captured_at - now) > $max_skew then
     "Usage: unknown (no usage reading from the last 15 minutes)"
 else
     "Usage: 5h \(.five_hour | percent) | weekly \(.weekly | percent) (source: \($source), \((now - .captured_at) / 60 | floor) min old)"
@@ -72,7 +118,7 @@ end
 # shellcheck disable=SC2016
 DISPATCH_BLOCK_PROGRAM='
 def rounded: if . == null then -1 else (. + 0.5 | floor) end;
-if .captured_at == null or (now - .captured_at) > $max_age then empty
+if .captured_at == null or (now - .captured_at) > $max_age or (.captured_at - now) > $max_skew then empty
 elif (.weekly | rounded) >= 99 then
     "\($usage). The weekly window is at 99% or more: start no subagent; finish the current step, report, and wait for the user."
 elif (.five_hour | rounded) >= 85 then
@@ -83,7 +129,7 @@ else empty end
 read_claude_usage() {
     local state_file="$HARNESS_HOME/state/rate_limits.json"
     [ -f "$state_file" ] || return 1
-    jq -c "$CLAUDE_USAGE_PROGRAM" "$state_file" 2>/dev/null
+    jq -cs "$CLAUDE_USAGE_PROGRAM" "$state_file" 2>/dev/null
 }
 
 read_codex_usage() {
@@ -93,8 +139,13 @@ read_codex_usage() {
     # lexicographic maximum is the most recent session.
     newest_rollout="$(find "$sessions_dir" -type f -name 'rollout-*.jsonl' | sort | tail -n 1)"
     [ -n "$newest_rollout" ] || return 1
-    last_event="$(jq -c 'select(.type == "event_msg" and .payload.type == "token_count"
-        and .payload.rate_limits != null)' "$newest_rollout" 2>/dev/null | tail -n 1)"
+    # The log grows with the session and is read before and after every subagent call, so grep keeps
+    # only token_count lines and awk puts the newest first, letting jq stop at the first reading.
+    # Each line is parsed on its own: one broken by a crash or still being written hides no other.
+    last_event="$(grep -F '"token_count"' "$newest_rollout" 2>/dev/null \
+        | awk '{ lines[NR] = $0 } END { for (number = NR; number > 0; number--) print lines[number] }' \
+        | jq -cnR 'first(inputs | (fromjson | select(.type == "event_msg" and .payload.type == "token_count"
+            and .payload.rate_limits != null))?)')"
     [ -n "$last_event" ] || return 1
     printf '%s' "$last_event" | jq -c "$CODEX_USAGE_PROGRAM" 2>/dev/null
 }
@@ -123,8 +174,10 @@ usage_line() {
         echo "Usage: unknown (no usage reading available)"
         return 0
     fi
+    # A failing usage line would make Claude Code block the prompt, so usage data never fails the hook.
     printf '%s' "$reading" | jq -r --arg source "$source" --argjson max_age "$MAX_READING_AGE_SECONDS" \
-        "$FORMAT_USAGE_PROGRAM"
+        --argjson max_skew "$MAX_CLOCK_SKEW_SECONDS" "$FORMAT_USAGE_PROGRAM" 2>/dev/null \
+        || echo "Usage: unknown (no usage reading available)"
 }
 
 # A missing or unreadable reading allows the subagent: the gate never blocks on unknown usage.
@@ -133,7 +186,7 @@ dispatch_block_reason() {
     reading="$(read_usage "$harness")" || return 0
     [ -n "$reading" ] || return 0
     printf '%s' "$reading" | jq -r --argjson max_age "$MAX_READING_AGE_SECONDS" \
-        --arg usage "$(usage_line "$harness")" "$DISPATCH_BLOCK_PROGRAM"
+        --argjson max_skew "$MAX_CLOCK_SKEW_SECONDS" --arg usage "$(usage_line "$harness")" "$DISPATCH_BLOCK_PROGRAM"
 }
 
 # Prints the project's own instruction file for the harness; fails for harnesses without one.
@@ -160,16 +213,13 @@ project_rules_file() {
 # The project's rules lose weight between compactions like the global ones, but repeating the
 # whole file on every prompt would fill the context, so the reminder names it and its sections.
 project_rules_line() {
-    local file titles
+    local file
     file="$(project_rules_file "$1")" || return 0
     # A file that cannot be read still gets its line, without sections: the reminder must not
     # break, and the path lets the agent open the file and see the error itself.
-    titles="$(awk -v max="$MAX_SECTION_TITLES" "$SECTION_TITLES_PROGRAM" "$file" 2>/dev/null)" || titles=""
-    if [ -n "$titles" ]; then
-        echo "- Project rules: $file apply ($titles); re-read the relevant section before acting on it."
-    else
-        echo "- Project rules: $file apply; re-read the relevant section before acting on it."
-    fi
+    head -c "$MAX_PROJECT_RULES_BYTES" "$file" 2>/dev/null | jq -nrR --arg path "$file" \
+        --argjson max_titles "$MAX_SECTION_TITLES" --argjson max_title "$MAX_TITLE_CHARACTERS" \
+        --argjson max_characters "$MAX_TITLE_LIST_CHARACTERS" "$PROJECT_RULES_PROGRAM"
 }
 
 build_context() {
@@ -205,6 +255,16 @@ build_context() {
             ;;
     esac
     usage_line "$harness"
+}
+
+# Claude Code passes the tool call as JSON on standard input. A subagent launched in the background
+# returns at once, so a usage line after it would repeat the reading the model already has. jq reads
+# standard input directly: with it closed, a command substitution would hand jq its own output pipe.
+is_background_subagent() {
+    if [ "$1" != claude ] || [ -t 0 ]; then
+        return 1
+    fi
+    jq -e '.tool_input.run_in_background == true' >/dev/null 2>&1
 }
 
 # Each harness expects its own output shape; see the adapter table in README.md.
@@ -256,6 +316,9 @@ main() {
     if [ "$#" -ne 2 ]; then
         echo "Usage: inject.sh <harness> <prompt|compact|subagent|dispatch>" >&2
         exit 2
+    fi
+    if [ "$2" = subagent ] && is_background_subagent "$1"; then
+        exit 0
     fi
     local context
     context="$(build_context "$1" "$2")" || exit 2

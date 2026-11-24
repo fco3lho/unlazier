@@ -63,6 +63,8 @@ function Format-Window {
     return "${Label}: [$(Format-Bar ([double]$percent))] $rounded% $MiddleDot resets in $remaining"
 }
 
+# Two status lines can refresh at the same moment, so each writes its own temporary file, under
+# a name nobody can guess, and moves it into place in one step.
 function Save-RateLimits {
     param($RateLimits)
     $snapshot = [ordered]@{ captured_at = [System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
@@ -70,10 +72,17 @@ function Save-RateLimits {
         $snapshot[$property.Name] = $property.Value
     }
     $json = ConvertTo-Json -InputObject ([pscustomobject]$snapshot) -Depth 20 -Compress
-    $temporaryFile = "$StateFile.tmp"
-    [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $StateFile))
-    [System.IO.File]::WriteAllText($temporaryFile, $json, $Utf8NoBom)
-    Move-Item -LiteralPath $temporaryFile -Destination $StateFile -Force
+    $stateFolder = Split-Path -Parent $StateFile
+    $temporaryFile = [System.IO.Path]::Combine($stateFolder, ".rate_limits.$([guid]::NewGuid().ToString('N'))")
+    [void][System.IO.Directory]::CreateDirectory($stateFolder)
+    try {
+        [System.IO.File]::WriteAllText($temporaryFile, $json, $Utf8NoBom)
+        Move-Item -LiteralPath $temporaryFile -Destination $StateFile -Force
+    } finally {
+        if (Test-Path -LiteralPath $temporaryFile) {
+            Remove-Item -LiteralPath $temporaryFile -Force
+        }
+    }
 }
 
 function Write-Text {

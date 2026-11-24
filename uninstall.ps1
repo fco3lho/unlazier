@@ -7,7 +7,7 @@
     The work is done by install.ps1 in uninstall mode, so both share one harness table.
 
     From a clone:     .\uninstall.ps1 [-Harness <names|all>] [-Yes]
-    Without a clone:  irm https://raw.githubusercontent.com/fco3lho/unlazier/main/uninstall.ps1 | iex
+    Without a clone:  irm https://github.com/fco3lho/unlazier/releases/latest/download/uninstall.ps1 | iex
 
 .PARAMETER Harness
     Comma-separated names (claude,opencode,codex,copilot,gemini,amp,kiro,cline,devin) or "all".

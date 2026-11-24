@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./install.sh [--harness <names|all>] [--yes] [--uninstall]
-#   curl -fsSL https://raw.githubusercontent.com/fco3lho/unlazier/main/install.sh | bash
+#   curl -fsSL https://github.com/fco3lho/unlazier/releases/latest/download/install.sh | bash
 #
 #   --harness    comma-separated names (claude,opencode,codex,copilot,gemini,amp,kiro,cline,devin)
 #                or "all". Without it, an interactive menu is shown.
@@ -48,7 +48,13 @@ V1_SKILL_CHECKSUMS="bugfix 1429495546 1065
 code-review 4077940051 2292
 refactoring 3722468995 1349"
 V1_OPENCODE_CONFIG='{"$schema":"https://opencode.ai/config.json","instructions":["~/.config/opencode/AGENTS.md","~/.config/opencode/rules/*.md"],"skills":{"paths":["~/.config/opencode/skills"]}}'
-V1_GLOBAL_HEADING="# Global Agent Rules"
+V1_GLOBAL_CHECKSUM="2969683781 6213"
+
+# Hook entries, the status line, and Cline hook scripts are ours when they run one of the payload
+# scripts, under the current folder name or the 2.0 one; a user's own path that only mentions
+# unlazier (a fork, for example) is not. The pattern also fits raw JSON, where a separator may be
+# written as \\ or \/.
+OWNED_SCRIPT_PATTERN='[/\\]unlazier(-ai)?[/\\]+(inject|alert|claude-statusline)\.(sh|ps1)'
 
 MODE="install"
 ASSUME_YES=false
@@ -95,6 +101,18 @@ harness_home() {
         cline) echo "$HOME/Documents/Cline" ;;
         devin) echo "$HOME/.devin" ;;
         *) die "unknown harness '$1'" ;;
+    esac
+}
+
+# Hook commands carry the harness home inside double quotes, where these characters would run
+# code or end the quoting each time the hook runs.
+assert_safe_home() {
+    local home
+    home="$(harness_home "$1")"
+    case "$home" in
+        *'$'* | *'`'* | *'"'* | *\\*)
+            die "$(harness_label "$1"): the folder $home contains \$, \`, \", or \\, which a hook command cannot carry safely; nothing was installed. Use a folder without these characters."
+            ;;
     esac
 }
 
@@ -153,14 +171,14 @@ alert_command() {
 
 # Claude Code, Codex, Gemini CLI, and Devin share the same hook layout:
 # {"hooks": {"<Event>": [{"matcher": "...", "hooks": [{"type": "command", "command": "..."}]}]}}.
-# Entries whose command mentions unlazier are ours; everything else is left untouched.
-# add_hook replaces only our entry for the same matcher, because one event can carry several of
-# ours (Claude Code PreToolUse has both the question alert and the subagent gate).
+# Entries whose command matches $owned (OWNED_SCRIPT_PATTERN) are ours; everything else is left
+# untouched. add_hook replaces only our entry for the same matcher, because one event can carry
+# several of ours (Claude Code PreToolUse has both the question alert and the subagent gate).
 JQ_HOOK_HELPERS='
 def without_ours_where(targeted):
     if type == "array" then
         map(if (targeted) and (.hooks | type) == "array"
-            then .hooks |= map(select((.command // "") | tostring | contains("unlazier") | not))
+            then .hooks |= map(select((.command // "") | tostring | test($owned) | not))
             else . end)
         | map(select((.hooks | type) != "array" or (.hooks | length) > 0))
     else . end;
@@ -177,12 +195,34 @@ def remove_ours:
     else . end;
 '
 
+# Replaces the file's content with the output of a command, which may read the file. The output
+# goes to a private temporary file first, so a failing command leaves the file as it was; it is
+# then copied into the file rather than moved over it, so the file keeps its mode, owner, and
+# symbolic link (dotfiles managers link these configs).
+rewrite_file() {
+    local file="$1" temporary_file
+    shift
+    temporary_file="$(mktemp "$(dirname "$file")/.unlazier.XXXXXX")" || return 1
+    if "$@" > "$temporary_file" && cat "$temporary_file" > "$file"; then
+        rm -f "$temporary_file"
+        return 0
+    fi
+    rm -f "$temporary_file"
+    return 1
+}
+
+jq_on_text() {
+    local text="$1"
+    shift
+    printf '%s' "$text" | jq "$@"
+}
+
 # Applies a jq program to a JSON config file in place. A missing file starts as {}; an
 # unreadable one is left untouched so a hand-edited config is never damaged.
 update_json_file() {
     local file="$1" program="$2"
     shift 2
-    local input="{}" temporary_file
+    local input="{}"
     if [ -f "$file" ]; then
         if ! jq empty "$file" >/dev/null 2>&1; then
             warn "$file is not valid JSON; skipped. Add the Unlazier hook by hand (see README)."
@@ -193,21 +233,18 @@ update_json_file() {
         [ -n "$(printf '%s' "$input" | tr -d '[:space:]')" ] || input="{}"
     fi
     mkdir -p "$(dirname "$file")"
-    temporary_file="$file.unlazier.tmp"
     # Explicit checks: callers run this inside conditions, where errexit does not apply.
-    if ! printf '%s' "$input" | jq "$@" "$JQ_HOOK_HELPERS $program" > "$temporary_file"; then
-        rm -f "$temporary_file"
+    if ! rewrite_file "$file" jq_on_text "$input" --arg owned "$OWNED_SCRIPT_PATTERN" "$@" "$JQ_HOOK_HELPERS $program"; then
         warn "could not update $file; it was left unchanged."
         return 1
     fi
-    mv "$temporary_file" "$file"
 }
 
 # Removes our entries; deletes the file if nothing else remains in it. A file without our
 # entries is not rewritten, so its formatting stays as the user left it.
 clean_json_file() {
     local file="$1" program="$2"
-    [ -f "$file" ] && grep -q "unlazier" "$file" || return 0
+    [ -f "$file" ] && grep -Eq "$OWNED_SCRIPT_PATTERN" "$file" || return 0
     update_json_file "$file" "$program" || return 0
     if [ "$(jq -c . "$file")" = "{}" ]; then
         rm -f "$file"
@@ -361,7 +398,7 @@ devin_hooks_file() {
 # and ours is not wired in, because one event can only have one script.
 write_cline_hook() {
     local hook_file="$1" body="$2"
-    if [ -f "$hook_file" ] && ! grep -q "unlazier" "$hook_file"; then
+    if [ -f "$hook_file" ] && ! grep -Eq "$OWNED_SCRIPT_PATTERN" "$hook_file"; then
         warn "$hook_file already exists; the Unlazier hook for that event was not installed."
         return 1
     fi
@@ -372,7 +409,7 @@ write_cline_hook() {
 
 remove_cline_hook() {
     local hook_file="$1"
-    if [ -f "$hook_file" ] && grep -q "unlazier" "$hook_file"; then
+    if [ -f "$hook_file" ] && grep -Eq "$OWNED_SCRIPT_PATTERN" "$hook_file"; then
         rm -f "$hook_file"
     fi
 }
@@ -410,7 +447,7 @@ uninstall_statusline() {
     local settings
     settings="$(harness_home claude)/settings.json"
     clean_json_file "$settings" \
-        'if ((.statusLine.command // "") | contains("unlazier")) then del(.statusLine) else . end'
+        'if ((.statusLine.command // "") | tostring | test($owned)) then del(.statusLine) else . end'
 }
 
 # ---------------------------------------------------------------------------
@@ -427,9 +464,44 @@ render_rules() {
     done
 }
 
-# Replaces the block between the markers, or appends it when the file has none.
+# A block runs from a start marker line to the next end marker line. A start marker followed by
+# another start marker, or by none, opens no block: it stays as text, with the user's lines after
+# it, which a broken block would otherwise swallow up to the end of the file.
+
+# Prints the number of blocks and the number of start markers that open none.
+count_markers() {
+    awk -v start="$2" -v end="$3" '
+        $0 == start { unclosed += open; open = 1; next }
+        open && $0 == end { blocks++; open = 0 }
+        END { print blocks + 0, unclosed + open }
+    ' "$1"
+}
+
+# Prints the file with each block replaced by the block file's content (only the first block
+# receives it, so duplicates collapse into one), or removed when no block file is given.
+rewrite_blocks() {
+    local file="$1" start="$2" end="$3" block_file="${4:-}"
+    awk -v start="$start" -v end="$end" -v block="$block_file" '
+        function release(   i) { for (i = 1; i <= held; i++) print lines[i]; held = 0 }
+        $0 == start { release(); held = 1; lines[1] = $0; next }
+        held && $0 == end {
+            held = 0
+            if (block != "") while ((getline line < block) > 0) print line
+            next
+        }
+        held { lines[++held] = $0; next }
+        { print }
+        END { release() }
+    ' "$file"
+}
+
+report_unclosed_marker() {
+    add_notice "$1 has a '$2' line with no '$3' line after it; that line and the text after it were kept. Delete the stray line by hand."
+}
+
+# Replaces the block, or appends one when the file has none.
 write_block() {
-    local file="$1" block_file temporary_file
+    local file="$1" block_file blocks=0 unclosed=0
     mkdir -p "$(dirname "$file")"
     block_file="$(mktemp)"
     {
@@ -438,14 +510,15 @@ write_block() {
         echo "$MARKER_END"
     } > "$block_file"
 
-    if [ -f "$file" ] && grep -qxF "$MARKER_START" "$file"; then
-        temporary_file="$file.unlazier.tmp"
-        awk -v start="$MARKER_START" -v end="$MARKER_END" -v block="$block_file" '
-            $0 == start { while ((getline line < block) > 0) print line; skipping = 1; next }
-            skipping && $0 == end { skipping = 0; next }
-            !skipping { print }
-        ' "$file" > "$temporary_file" || { rm -f "$temporary_file" "$block_file"; die "could not update $file"; }
-        mv "$temporary_file" "$file"
+    if [ -f "$file" ]; then
+        read -r blocks unclosed < <(count_markers "$file" "$MARKER_START" "$MARKER_END")
+    fi
+    if [ "$unclosed" -gt 0 ]; then
+        report_unclosed_marker "$file" "$MARKER_START" "$MARKER_END"
+    fi
+    if [ "$blocks" -gt 0 ]; then
+        rewrite_file "$file" rewrite_blocks "$file" "$MARKER_START" "$MARKER_END" "$block_file" \
+            || { rm -f "$block_file"; die "could not update $file"; }
     else
         # A file without a final newline would glue the marker to its last line.
         if [ -s "$file" ] && [ -n "$(tail -c 1 "$file")" ]; then
@@ -459,15 +532,14 @@ write_block() {
 # Removes the block (marked with the current markers unless others are given); deletes the
 # file when only whitespace is left.
 remove_block() {
-    local file="$1" start="${2:-$MARKER_START}" end="${3:-$MARKER_END}" temporary_file
+    local file="$1" start="${2:-$MARKER_START}" end="${3:-$MARKER_END}" blocks unclosed
     [ -f "$file" ] && grep -qxF "$start" "$file" || return 0
-    temporary_file="$file.unlazier.tmp"
-    awk -v start="$start" -v end="$end" '
-        $0 == start { skipping = 1; next }
-        skipping && $0 == end { skipping = 0; next }
-        !skipping { print }
-    ' "$file" > "$temporary_file" || { rm -f "$temporary_file"; die "could not update $file"; }
-    mv "$temporary_file" "$file"
+    read -r blocks unclosed < <(count_markers "$file" "$start" "$end")
+    if [ "$unclosed" -gt 0 ]; then
+        report_unclosed_marker "$file" "$start" "$end"
+    fi
+    [ "$blocks" -gt 0 ] || return 0
+    rewrite_file "$file" rewrite_blocks "$file" "$start" "$end" || die "could not update $file"
     if ! grep -q '[^[:space:]]' "$file"; then
         rm -f "$file"
     fi
@@ -518,8 +590,9 @@ uninstall_rules() {
 }
 
 # Removes what version 2.0 installed under its old name, so it does not load next to the
-# renamed files. Hook entries, the status line, and rule files need nothing extra: their
-# names contain "unlazier", which matches both names.
+# renamed files. Hook entries and the status line need nothing extra, because
+# OWNED_SCRIPT_PATTERN matches both folder names, and neither do rule files, because
+# "unlazier*.md" matches both prefixes.
 remove_legacy_names() {
     local harness="$1" home folder
     home="$(harness_home "$harness")"
@@ -590,8 +663,10 @@ find_v1_leftovers() {
 
     global_file="$home/AGENTS.md"
     [ "$harness" = "claude" ] && global_file="$home/CLAUDE.md"
-    if [ -f "$global_file" ] && [ "$(head -n 1 "$global_file")" = "$V1_GLOBAL_HEADING" ] \
-        && ! grep -qxF "$MARKER_START" "$global_file"; then
+    # Version 1 made the rules/ paths in the Claude Code copy absolute; they are made relative
+    # again so the copy matches the checksum of the shipped file.
+    if [ -f "$global_file" ] && [ "$(sed 's|`[^`]*/\.claude/rules/|`rules/|g' "$global_file" \
+        | cksum | awk '{print $1" "$2}')" = "$V1_GLOBAL_CHECKSUM" ]; then
         echo "$global_file"
     fi
 
@@ -868,6 +943,9 @@ main() {
             uninstall_harness "$harness"
         done
     else
+        for harness in $harnesses; do
+            assert_safe_home "$harness"
+        done
         prepare_source
         [ "$HAS_JQ" = true ] || print_jq_help
         for harness in $harnesses; do
