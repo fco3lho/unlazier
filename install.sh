@@ -432,14 +432,19 @@ install_statusline() {
     local home settings
     home="$(harness_home claude)"
     settings="$home/settings.json"
-    if [ -f "$settings" ] && [ "$(jq 'has("statusLine")' "$settings" 2>/dev/null)" = "true" ]; then
+    # A status line that is not ours is the user's and stays. One installed by an earlier version is
+    # ours: it gets the current script and command, and keeps any field the user added.
+    if [ -f "$settings" ] && [ "$(jq --arg owned "$OWNED_SCRIPT_PATTERN" \
+        'has("statusLine") and ((.statusLine | type) != "object"
+            or ((.statusLine.command // "") | tostring | test($owned) | not))' "$settings" 2>/dev/null)" = "true" ]; then
         [ -f "$home/state/rate_limits.json" ] \
             || add_notice "Claude Code: you already have a status line, so it was kept. To give the agent its usage, make it save the 'rate_limits' it receives to $home/state/rate_limits.json (see README)."
         return 1
     fi
     cp "$SOURCE_DIR/statusline/claude-statusline.sh" "$home/$PAYLOAD_DIR_NAME/"
     chmod +x "$home/$PAYLOAD_DIR_NAME/claude-statusline.sh"
-    update_json_file "$settings" '.statusLine = {type: "command", command: $command, refreshInterval: 60}' \
+    update_json_file "$settings" \
+        '.statusLine = ((.statusLine // {}) + {type: "command", command: $command}) | .statusLine.refreshInterval //= 60' \
         --arg command "bash \"$home/$PAYLOAD_DIR_NAME/claude-statusline.sh\""
 }
 

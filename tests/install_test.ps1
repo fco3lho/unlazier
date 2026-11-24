@@ -1292,6 +1292,37 @@ function Test-StatusLineTemporaryFileUnpredictable {
     Assert-That 'no temporary files left' { @(Get-ChildItem -LiteralPath $stateFolder -File -Force).Count -eq 2 }
 }
 
+function Test-StatusLineUpgrade {
+    Write-Host "reinstalling refreshes Unlazier's own status line"
+    $testHome = New-TestHome
+    [void](Invoke-Installer $testHome @('-Harness', 'claude'))
+    $settingsPath = Join-TestPath $testHome '.claude/settings.json'
+    $script = Join-TestPath $testHome '.claude/unlazier/claude-statusline.ps1'
+    $source = [System.IO.Path]::Combine($RepositoryDirectory, 'statusline', 'claude-statusline.ps1')
+    # An install from an earlier version: an older script, no refresh interval, a field the user added.
+    Write-TestFile $script "Write-Output 'old'`n"
+    $settings = Read-TestJson $settingsPath
+    $settings.statusLine.PSObject.Properties.Remove('refreshInterval')
+    Add-Member -InputObject $settings.statusLine -NotePropertyName 'padding' -NotePropertyValue 2
+    Write-TestJson $settingsPath $settings
+    [void](Invoke-Installer $testHome @('-Harness', 'claude'))
+
+    Assert-That 'the status line script is the current one' {
+        (Get-FileHash -LiteralPath $script).Hash -eq (Get-FileHash -LiteralPath $source).Hash
+    }
+    Assert-That 'a missing refresh interval is added' { (Read-TestJson $settingsPath).statusLine.refreshInterval -eq 60 }
+    Assert-That 'other status line fields are kept' { (Read-TestJson $settingsPath).statusLine.padding -eq 2 }
+
+    $settings = Read-TestJson $settingsPath
+    $currentCommand = $settings.statusLine.command
+    $settings.statusLine.command = $currentCommand.Replace('/unlazier/', '/unlazier-ai/')
+    Write-TestJson $settingsPath $settings
+    [void](Invoke-Installer $testHome @('-Harness', 'claude'))
+    Assert-That 'a status line from the 2.0 folder points at the current script' {
+        (Read-TestJson $settingsPath).statusLine.command -eq $currentCommand
+    }
+}
+
 $originalEnvironment = @{}
 foreach ($name in $IsolatedVariables) {
     $originalEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
@@ -1324,6 +1355,7 @@ try {
     Test-UpgradeRemovesObsoletePayload
     Test-StatusLineSavesUsage
     Test-StatusLineTemporaryFileUnpredictable
+    Test-StatusLineUpgrade
 } finally {
     foreach ($name in $IsolatedVariables) {
         [Environment]::SetEnvironmentVariable($name, $originalEnvironment[$name])

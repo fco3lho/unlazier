@@ -682,18 +682,32 @@ param(
         if ($null -eq $document) {
             return $false
         }
+        # A status line that is not ours is the user's and stays. One installed by an earlier version
+        # is ours: it gets the current script and command, and keeps any field the user added.
+        $statusLine = [pscustomobject]@{}
         if ($null -ne $document.PSObject.Properties['statusLine']) {
-            $stateFile = [System.IO.Path]::Combine($claudeHome, 'state', 'rate_limits.json')
-            if (-not (Test-Path -LiteralPath $stateFile -PathType Leaf)) {
-                Add-Notice "Claude Code: you already have a status line, so it was kept. To give the agent its usage, make it save the 'rate_limits' it receives to $stateFile (see README)."
+            $existing = $document.statusLine
+            $existingCommand = Get-JsonProperty $existing 'command'
+            $isOurs = $existing -is [System.Management.Automation.PSCustomObject] -and $null -ne $existingCommand `
+                -and [regex]::IsMatch([string]$existingCommand, $OwnedScriptPattern)
+            if (-not $isOurs) {
+                $stateFile = [System.IO.Path]::Combine($claudeHome, 'state', 'rate_limits.json')
+                if (-not (Test-Path -LiteralPath $stateFile -PathType Leaf)) {
+                    Add-Notice "Claude Code: you already have a status line, so it was kept. To give the agent its usage, make it save the 'rate_limits' it receives to $stateFile (see README)."
+                }
+                return $false
             }
-            return $false
+            $statusLine = $existing
         }
         $scriptPath = [System.IO.Path]::Combine($claudeHome, $PayloadDirectoryName, 'claude-statusline.ps1')
         Copy-Item -LiteralPath ([System.IO.Path]::Combine($State.SourceDirectory, 'statusline', 'claude-statusline.ps1')) `
             -Destination $scriptPath -Force
-        Set-JsonProperty $document 'statusLine' ([pscustomobject]@{
-            type = 'command'; command = (Get-ScriptCommand $scriptPath ''); refreshInterval = 60 })
+        Set-JsonProperty $statusLine 'type' 'command'
+        Set-JsonProperty $statusLine 'command' (Get-ScriptCommand $scriptPath '')
+        if ($null -eq (Get-JsonProperty $statusLine 'refreshInterval')) {
+            Set-JsonProperty $statusLine 'refreshInterval' 60
+        }
+        Set-JsonProperty $document 'statusLine' $statusLine
         Write-JsonConfig $settingsPath $document
         return $true
     }
