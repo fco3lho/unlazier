@@ -859,6 +859,28 @@ test_inject_dispatch_gate() {
         test "$(bash "$home/.gemini/unlazier/inject.sh" gemini dispatch >/dev/null 2>&1; echo $?)" = "2"
 }
 
+test_inject_background_subagent() {
+    local home inject reports_usage background
+    echo "a subagent launched in the background adds no usage line"
+    home="$(new_home)"
+    run_installer "$home" --harness claude,codex >/dev/null 2>&1
+    write_claude_usage "$home" 40 50
+    inject="$home/.claude/unlazier/inject.sh"
+    reports_usage='.hookSpecificOutput.hookEventName == "PostToolUse"
+        and (.hookSpecificOutput.additionalContext | startswith("Usage: "))'
+    background='{"tool_input":{"run_in_background":true}}'
+
+    check "a background launch prints nothing" \
+        test "$(printf '%s' "$background" | bash "$inject" claude subagent; echo "exit $?")" = "exit 0"
+    check "a foreground launch reports usage" json_has \
+        <(printf '%s' '{"tool_input":{"run_in_background":false}}' | bash "$inject" claude subagent) "$reports_usage"
+    check "invalid hook input reports usage" json_has <(printf 'not json' | bash "$inject" claude subagent) "$reports_usage"
+    check "empty hook input reports usage" json_has <(bash "$inject" claude subagent </dev/null) "$reports_usage"
+    check "closed standard input reports usage" json_has <(bash "$inject" claude subagent <&-) "$reports_usage"
+    check "Codex ignores the background flag" json_has \
+        <(printf '%s' "$background" | bash "$home/.codex/unlazier/inject.sh" codex subagent) "$reports_usage"
+}
+
 test_auto_continue_notice() {
     local home output
     echo "the installer reports auto-continue turned off without changing it"
@@ -952,6 +974,7 @@ main() {
     test_inject_project_rules
     test_inject_untrusted_project_rules
     test_inject_dispatch_gate
+    test_inject_background_subagent
     test_auto_continue_notice
     test_upgrade_removes_obsolete_payload
     test_statusline_saves_usage

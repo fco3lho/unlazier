@@ -6,7 +6,8 @@
 #   compact  prints the core principles, the reminder, and the usage line; runs after
 #            context compaction, when the original instructions may have been summarized away.
 #   subagent prints only the usage line, as Claude Code or Codex PostToolUse context; runs after
-#            each subagent call, so a long turn sees usage change between prompts.
+#            each subagent call, so a long turn sees usage change between prompts. Prints nothing
+#            after a Claude Code subagent launched in the background.
 #   dispatch denies a Claude Code or Codex subagent call while the usage ladder forbids
 #            subagents (5-hour window at 85% or more, weekly at 99% or more) and prints nothing
 #            otherwise.
@@ -256,6 +257,16 @@ build_context() {
     usage_line "$harness"
 }
 
+# Claude Code passes the tool call as JSON on standard input. A subagent launched in the background
+# returns at once, so a usage line after it would repeat the reading the model already has. jq reads
+# standard input directly: with it closed, a command substitution would hand jq its own output pipe.
+is_background_subagent() {
+    if [ "$1" != claude ] || [ -t 0 ]; then
+        return 1
+    fi
+    jq -e '.tool_input.run_in_background == true' >/dev/null 2>&1
+}
+
 # Each harness expects its own output shape; see the adapter table in README.md.
 emit() {
     local harness="$1" event="$2" context="$3"
@@ -305,6 +316,9 @@ main() {
     if [ "$#" -ne 2 ]; then
         echo "Usage: inject.sh <harness> <prompt|compact|subagent|dispatch>" >&2
         exit 2
+    fi
+    if [ "$2" = subagent ] && is_background_subagent "$1"; then
+        exit 0
     fi
     local context
     context="$(build_context "$1" "$2")" || exit 2

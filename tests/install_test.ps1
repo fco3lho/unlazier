@@ -113,8 +113,11 @@ function Invoke-Uninstaller {
 }
 
 function Invoke-Inject {
-    param([string]$TestHome, [string]$PayloadDirectory, [string]$Harness, [string]$EventName)
+    param([string]$TestHome, [string]$PayloadDirectory, [string]$Harness, [string]$EventName, [string]$InputText)
     $scriptPath = [System.IO.Path]::Combine((Join-TestPath $TestHome $PayloadDirectory), 'unlazier', 'inject.ps1')
+    if ($PSBoundParameters.ContainsKey('InputText')) {
+        return Invoke-TestScript $TestHome $scriptPath @($Harness, $EventName) $InputText
+    }
     return Invoke-TestScript $TestHome $scriptPath @($Harness, $EventName)
 }
 
@@ -1161,6 +1164,38 @@ function Test-InjectDispatchGate {
     Assert-That 'the gate is only for Claude and Codex' { (Invoke-Inject $testHome '.gemini' 'gemini' 'dispatch').ExitCode -eq 2 }
 }
 
+function Test-ReportsUsage {
+    param($Result)
+    $output = (ConvertFrom-OutputJson $Result).hookSpecificOutput
+    return $output.hookEventName -eq 'PostToolUse' -and $output.additionalContext.StartsWith('Usage: ')
+}
+
+function Test-InjectBackgroundSubagent {
+    Write-Host 'a subagent launched in the background adds no usage line'
+    $testHome = New-TestHome
+    [void](Invoke-Installer $testHome @('-Harness', 'claude,codex'))
+    Write-ClaudeUsage $testHome 40 50
+    $background = '{"tool_input":{"run_in_background":true}}'
+
+    Assert-That 'a background launch prints nothing' {
+        $result = Invoke-Inject $testHome '.claude' 'claude' 'subagent' $background
+        $result.ExitCode -eq 0 -and @($result.Lines | Where-Object { $_ -ne '' }).Count -eq 0
+    }
+    Assert-That 'a foreground launch reports usage' {
+        Test-ReportsUsage (Invoke-Inject $testHome '.claude' 'claude' 'subagent' '{"tool_input":{"run_in_background":false}}')
+    }
+    Assert-That 'invalid hook input reports usage' {
+        Test-ReportsUsage (Invoke-Inject $testHome '.claude' 'claude' 'subagent' 'not json')
+    }
+    Assert-That 'empty hook input reports usage' {
+        Test-ReportsUsage (Invoke-Inject $testHome '.claude' 'claude' 'subagent' '')
+    }
+    Assert-That 'no hook input reports usage' { Test-ReportsUsage (Invoke-Inject $testHome '.claude' 'claude' 'subagent') }
+    Assert-That 'Codex ignores the background flag' {
+        Test-ReportsUsage (Invoke-Inject $testHome '.codex' 'codex' 'subagent' $background)
+    }
+}
+
 function Test-AutoContinueNotice {
     Write-Host 'the installer reports auto-continue turned off without changing it'
     $testHome = New-TestHome
@@ -1272,6 +1307,7 @@ try {
     Test-InjectProjectRules
     Test-InjectUntrustedProjectRules
     Test-InjectDispatchGate
+    Test-InjectBackgroundSubagent
     Test-AutoContinueNotice
     Test-UpgradeRemovesObsoletePayload
     Test-StatusLineSavesUsage

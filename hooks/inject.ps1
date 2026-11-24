@@ -5,7 +5,8 @@
 #   compact  prints the core principles, the reminder, and the usage line; runs after
 #            context compaction, when the original instructions may have been summarized away.
 #   subagent prints only the usage line, as Claude Code or Codex PostToolUse context; runs after
-#            each subagent call, so a long turn sees usage change between prompts.
+#            each subagent call, so a long turn sees usage change between prompts. Prints nothing
+#            after a Claude Code subagent launched in the background.
 #   dispatch denies a Claude Code or Codex subagent call while the usage ladder forbids
 #            subagents (5-hour window at 85% or more, weekly at 99% or more) and prints nothing
 #            otherwise.
@@ -466,6 +467,22 @@ function Get-Context {
     return $text.TrimEnd("`n")
 }
 
+# Claude Code passes the tool call as JSON on standard input. A subagent launched in the background
+# returns at once, so a usage line after it would repeat the reading the model already has.
+function Test-BackgroundSubagent {
+    if (-not [Console]::IsInputRedirected) {
+        return $false
+    }
+    try {
+        $hookInput = [Console]::In.ReadToEnd() | ConvertFrom-Json
+    } catch {
+        # Input that is not the expected JSON keeps the usage line, as in inject.sh.
+        return $false
+    }
+    $isBackground = Get-JsonProperty (Get-JsonProperty $hookInput 'tool_input') 'run_in_background'
+    return $isBackground -is [bool] -and $isBackground
+}
+
 # Escapes a string the way jq does: control characters as \u00xx, non-ASCII left as UTF-8.
 function ConvertTo-JsonString {
     param([string]$Text)
@@ -548,6 +565,9 @@ function Invoke-Main {
     if ($eventName -in @('subagent', 'dispatch') -and $harness -notin @('claude', 'codex')) {
         [Console]::Error.WriteLine("inject.ps1: the $eventName event is only for claude and codex")
         exit 2
+    }
+    if ($harness -eq 'claude' -and $eventName -eq 'subagent' -and (Test-BackgroundSubagent)) {
+        return
     }
     $context = Get-Context $harness $eventName
     if ($null -eq $context) {
