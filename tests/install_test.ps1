@@ -1185,6 +1185,17 @@ function Test-InjectBackgroundSubagent {
     Assert-That 'a foreground launch reports usage' {
         Test-ReportsUsage (Invoke-Inject $testHome '.claude' 'claude' 'subagent' '{"tool_input":{"run_in_background":false}}')
     }
+    Assert-That 'a launch Claude Code sent to the background prints nothing' {
+        $result = Invoke-Inject $testHome '.claude' 'claude' 'subagent' '{"tool_input":{"prompt":"x"},"tool_response":{"status":"async_launched","agentId":"a1"}}'
+        $result.ExitCode -eq 0 -and @($result.Lines | Where-Object { $_ -ne '' }).Count -eq 0
+    }
+    Assert-That 'a remote launch prints nothing' {
+        $result = Invoke-Inject $testHome '.claude' 'claude' 'subagent' '{"tool_response":{"status":"remote_launched"}}'
+        $result.ExitCode -eq 0 -and @($result.Lines | Where-Object { $_ -ne '' }).Count -eq 0
+    }
+    Assert-That 'a completed subagent reports usage' {
+        Test-ReportsUsage (Invoke-Inject $testHome '.claude' 'claude' 'subagent' '{"tool_response":{"status":"completed"}}')
+    }
     Assert-That 'invalid hook input reports usage' {
         Test-ReportsUsage (Invoke-Inject $testHome '.claude' 'claude' 'subagent' 'not json')
     }
