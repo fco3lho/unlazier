@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./install.sh [--harness <names|all>] [--yes] [--uninstall]
-#   curl -fsSL https://raw.githubusercontent.com/fco3lho/unlazier/main/install.sh | bash
+#   curl -fsSL https://github.com/fco3lho/unlazier/releases/latest/download/install.sh | bash
 #
 #   --harness    comma-separated names (claude,opencode,codex,copilot,gemini,amp,kiro,cline,devin)
 #                or "all". Without it, an interactive menu is shown.

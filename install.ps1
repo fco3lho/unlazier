@@ -8,8 +8,8 @@
     line inside that reminder. Existing user content is never replaced and no backups are made.
 
     From a clone:     .\install.ps1 [-Harness <names|all>] [-Yes] [-Uninstall]
-    Without a clone:  irm https://raw.githubusercontent.com/fco3lho/unlazier/main/install.ps1 | iex
-    With options:     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/fco3lho/unlazier/main/install.ps1))) -Harness codex
+    Without a clone:  irm https://github.com/fco3lho/unlazier/releases/latest/download/install.ps1 | iex
+    With options:     & ([scriptblock]::Create((irm https://github.com/fco3lho/unlazier/releases/latest/download/install.ps1))) -Harness codex
 
 .PARAMETER Harness
     Comma-separated names (claude,opencode,codex,copilot,gemini,amp,kiro,cline,devin) or "all".

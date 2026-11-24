@@ -235,7 +235,7 @@ The uninstaller shows the same menu and removes only what Unlazier added: the `u
 
 Version 1 copied its files over your configuration in `~/.claude` and `~/.config/opencode`. When you install version 2, the installer looks for those old files, lists them, and asks before removing them. Old rule and skill files are offered for removal only if they are exactly as version 1 left them; a file you edited is kept.
 
-The old `~/.claude/CLAUDE.md` (or `~/.config/opencode/AGENTS.md`) is recognized by its first line, `# Global Agent Rules`. If you added your own notes to it after installing version 1, answer **no** and move your notes out first: version 1 replaced that whole file, so the installer cannot tell your notes apart from the old rules.
+The old `~/.claude/CLAUDE.md` (or `~/.config/opencode/AGENTS.md`) is recognized only while it is exactly the file version 1 wrote. If you added your own notes to it, the installer does not offer to remove it: version 1 replaced that whole file, so move your notes to another file and delete the old rules yourself.
 
 Version 2.0 was called Unlazier AI and used `unlazier-ai` in its file and folder names. Installing again removes those and writes the new `unlazier` names in their place.
 
