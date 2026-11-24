@@ -73,6 +73,11 @@ param(
     $V1OpenCodeConfig = '{"$schema":"https://opencode.ai/config.json","instructions":["~/.config/opencode/AGENTS.md","~/.config/opencode/rules/*.md"],"skills":{"paths":["~/.config/opencode/skills"]}}'
     $V1GlobalHeading = '# Global Agent Rules'
 
+    # Hook entries and the status line are ours when they run one of the payload scripts, under
+    # the current folder name or the 2.0 one; a user's own path that only mentions unlazier (a
+    # fork, for example) is not.
+    $OwnedScriptPattern = '[/\\]unlazier(-ai)?[/\\]+(inject|alert|claude-statusline)\.(sh|ps1)'
+
     # Mutable run state lives in one object so functions can update it without scope modifiers.
     $State = @{
         SourceDirectory = ''
@@ -345,11 +350,11 @@ param(
 
     # Claude Code, Codex, Gemini CLI, and Devin share the same hook layout:
     # {"hooks": {"<Event>": [{"matcher": "...", "hooks": [{"type": "command", "command": "..."}]}]}}.
-    # Entries whose command mentions unlazier are ours; everything else is left untouched.
+    # Entries whose command matches $OwnedScriptPattern are ours; everything else is left untouched.
     function Test-OurCommand {
         param($Hook)
         $command = Get-JsonProperty $Hook 'command'
-        return ($null -ne $command) -and ([string]$command).Contains('unlazier')
+        return ($null -ne $command) -and [regex]::IsMatch([string]$command, $OwnedScriptPattern)
     }
 
     # With a matcher, only entries for that matcher lose our commands, because one event can carry
@@ -458,7 +463,7 @@ param(
         Remove-OurHooks $document
         if ($IncludeStatusLine) {
             $statusCommand = Get-JsonProperty (Get-JsonProperty $document 'statusLine') 'command'
-            if ($null -ne $statusCommand -and ([string]$statusCommand).Contains('unlazier')) {
+            if ($null -ne $statusCommand -and [regex]::IsMatch([string]$statusCommand, $OwnedScriptPattern)) {
                 $document.PSObject.Properties.Remove('statusLine')
             }
         }
@@ -832,8 +837,9 @@ param(
     }
 
     # Removes what version 2.0 installed under its old name, so it does not load next to the
-    # renamed files. Hook entries, the status line, and rule files need nothing extra: their
-    # names contain "unlazier", which matches both names.
+    # renamed files. Hook entries and the status line need nothing extra, because
+    # $OwnedScriptPattern matches both folder names, and neither do rule files, because
+    # 'unlazier*.md' matches both prefixes.
     function Remove-LegacyNames {
         param([string]$Name)
         $harnessHome = Get-HarnessHome $Name

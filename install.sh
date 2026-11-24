@@ -50,6 +50,12 @@ refactoring 3722468995 1349"
 V1_OPENCODE_CONFIG='{"$schema":"https://opencode.ai/config.json","instructions":["~/.config/opencode/AGENTS.md","~/.config/opencode/rules/*.md"],"skills":{"paths":["~/.config/opencode/skills"]}}'
 V1_GLOBAL_HEADING="# Global Agent Rules"
 
+# Hook entries, the status line, and Cline hook scripts are ours when they run one of the payload
+# scripts, under the current folder name or the 2.0 one; a user's own path that only mentions
+# unlazier (a fork, for example) is not. The pattern also fits raw JSON, where a separator may be
+# written as \\ or \/.
+OWNED_SCRIPT_PATTERN='[/\\]unlazier(-ai)?[/\\]+(inject|alert|claude-statusline)\.(sh|ps1)'
+
 MODE="install"
 ASSUME_YES=false
 REQUESTED_HARNESSES=""
@@ -153,14 +159,14 @@ alert_command() {
 
 # Claude Code, Codex, Gemini CLI, and Devin share the same hook layout:
 # {"hooks": {"<Event>": [{"matcher": "...", "hooks": [{"type": "command", "command": "..."}]}]}}.
-# Entries whose command mentions unlazier are ours; everything else is left untouched.
-# add_hook replaces only our entry for the same matcher, because one event can carry several of
-# ours (Claude Code PreToolUse has both the question alert and the subagent gate).
+# Entries whose command matches $owned (OWNED_SCRIPT_PATTERN) are ours; everything else is left
+# untouched. add_hook replaces only our entry for the same matcher, because one event can carry
+# several of ours (Claude Code PreToolUse has both the question alert and the subagent gate).
 JQ_HOOK_HELPERS='
 def without_ours_where(targeted):
     if type == "array" then
         map(if (targeted) and (.hooks | type) == "array"
-            then .hooks |= map(select((.command // "") | tostring | contains("unlazier") | not))
+            then .hooks |= map(select((.command // "") | tostring | test($owned) | not))
             else . end)
         | map(select((.hooks | type) != "array" or (.hooks | length) > 0))
     else . end;
@@ -216,7 +222,7 @@ update_json_file() {
     fi
     mkdir -p "$(dirname "$file")"
     # Explicit checks: callers run this inside conditions, where errexit does not apply.
-    if ! rewrite_file "$file" jq_on_text "$input" "$@" "$JQ_HOOK_HELPERS $program"; then
+    if ! rewrite_file "$file" jq_on_text "$input" --arg owned "$OWNED_SCRIPT_PATTERN" "$@" "$JQ_HOOK_HELPERS $program"; then
         warn "could not update $file; it was left unchanged."
         return 1
     fi
@@ -226,7 +232,7 @@ update_json_file() {
 # entries is not rewritten, so its formatting stays as the user left it.
 clean_json_file() {
     local file="$1" program="$2"
-    [ -f "$file" ] && grep -q "unlazier" "$file" || return 0
+    [ -f "$file" ] && grep -Eq "$OWNED_SCRIPT_PATTERN" "$file" || return 0
     update_json_file "$file" "$program" || return 0
     if [ "$(jq -c . "$file")" = "{}" ]; then
         rm -f "$file"
@@ -380,7 +386,7 @@ devin_hooks_file() {
 # and ours is not wired in, because one event can only have one script.
 write_cline_hook() {
     local hook_file="$1" body="$2"
-    if [ -f "$hook_file" ] && ! grep -q "unlazier" "$hook_file"; then
+    if [ -f "$hook_file" ] && ! grep -Eq "$OWNED_SCRIPT_PATTERN" "$hook_file"; then
         warn "$hook_file already exists; the Unlazier hook for that event was not installed."
         return 1
     fi
@@ -391,7 +397,7 @@ write_cline_hook() {
 
 remove_cline_hook() {
     local hook_file="$1"
-    if [ -f "$hook_file" ] && grep -q "unlazier" "$hook_file"; then
+    if [ -f "$hook_file" ] && grep -Eq "$OWNED_SCRIPT_PATTERN" "$hook_file"; then
         rm -f "$hook_file"
     fi
 }
@@ -429,7 +435,7 @@ uninstall_statusline() {
     local settings
     settings="$(harness_home claude)/settings.json"
     clean_json_file "$settings" \
-        'if ((.statusLine.command // "") | contains("unlazier")) then del(.statusLine) else . end'
+        'if ((.statusLine.command // "") | tostring | test($owned)) then del(.statusLine) else . end'
 }
 
 # ---------------------------------------------------------------------------
@@ -533,8 +539,9 @@ uninstall_rules() {
 }
 
 # Removes what version 2.0 installed under its old name, so it does not load next to the
-# renamed files. Hook entries, the status line, and rule files need nothing extra: their
-# names contain "unlazier", which matches both names.
+# renamed files. Hook entries and the status line need nothing extra, because
+# OWNED_SCRIPT_PATTERN matches both folder names, and neither do rule files, because
+# "unlazier*.md" matches both prefixes.
 remove_legacy_names() {
     local harness="$1" home folder
     home="$(harness_home "$harness")"

@@ -494,6 +494,46 @@ function Test-ConfigFilesRewrittenInPlace {
     }
 }
 
+# A user's own scripts may live under a path that only mentions unlazier, such as a fork.
+function Initialize-ForeignUnlazierPaths {
+    param([string]$TestHome)
+    $fork = (Join-TestPath $TestHome 'unlazier-fork') -replace '\\', '/'
+    Write-TestJson (Join-TestPath $TestHome '.claude/settings.json') ([pscustomobject]@{
+        statusLine = [pscustomobject]@{ type = 'command'; command = "powershell -File `"$fork/status.ps1`"" }
+        hooks = [pscustomobject]@{
+            PreToolUse = [object[]]@([pscustomobject]@{ matcher = 'Bash'
+                hooks = [object[]]@([pscustomobject]@{ type = 'command'; command = "powershell -File `"$fork/guard.ps1`"" }) })
+            Stop = [object[]]@([pscustomobject]@{
+                hooks = [object[]]@([pscustomobject]@{ type = 'command'; command = "powershell -File `"$fork/notify.ps1`"" }) })
+        }
+    })
+}
+
+function Test-ForeignUnlazierPathsKept {
+    Write-Host 'entries whose path only mentions unlazier are left alone'
+    $testHome = New-TestHome
+    Initialize-ForeignUnlazierPaths $testHome
+    $settingsPath = Join-TestPath $testHome '.claude/settings.json'
+    $seededHash = (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash
+    $seededJson = ConvertTo-Json -InputObject (Read-TestJson $settingsPath) -Depth 20 -Compress
+    [void](Invoke-Uninstaller $testHome @('-Harness', 'claude'))
+
+    Assert-That 'uninstall leaves settings.json as it was' {
+        (Test-Path -LiteralPath $settingsPath -PathType Leaf) -and (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash -eq $seededHash
+    }
+    [void](Invoke-Installer $testHome @('-Harness', 'claude'))
+    $settings = Read-TestJson $settingsPath
+    Assert-That "install keeps the user's guard and end-of-turn hook" {
+        @(@((Get-HookCommands $settings 'PreToolUse') + (Get-HookCommands $settings 'Stop')) |
+            Where-Object { $_.Contains('unlazier-fork/') }).Count -eq 2
+    }
+    Assert-That "install keeps the user's status line" { $settings.statusLine.command.EndsWith('unlazier-fork/status.ps1"') }
+    [void](Invoke-Uninstaller $testHome @('-Harness', 'claude'))
+    Assert-That "uninstall after install restores the user's settings" {
+        (ConvertTo-Json -InputObject (Read-TestJson $settingsPath) -Depth 20 -Compress) -eq $seededJson
+    }
+}
+
 function Initialize-V1Installation {
     param([string]$TestHome)
     $v1 = [System.IO.Path]::Combine($FixturesDirectory, 'v1')
@@ -955,6 +995,7 @@ try {
     Test-ReinstallIsIdempotent
     Test-UninstallRestoresOriginalFiles
     Test-ConfigFilesRewrittenInPlace
+    Test-ForeignUnlazierPathsKept
     Test-V1LeftoversRemovedWithYes
     Test-V1LeftoversKeptWithoutConfirmation
     Test-UpgradeFromV20Layout

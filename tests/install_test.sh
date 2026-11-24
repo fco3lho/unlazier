@@ -298,6 +298,42 @@ test_temporary_file_names_unpredictable() {
     check "no temporary files left" test -z "$(find "$home/.claude" -name '.unlazier.*')"
 }
 
+# A user's own scripts may live under a path that only mentions unlazier, such as a fork.
+seed_foreign_unlazier_paths() {
+    local home="$1"
+    local fork="$home/unlazier-fork"
+    mkdir -p "$home/.claude" "$home/Documents/Cline/Hooks"
+    jq -n --arg guard "bash \"$fork/guard.sh\"" --arg notify "bash \"$fork/notify.sh\"" \
+        --arg status "bash \"$fork/status.sh\"" '{statusLine: {type: "command", command: $status},
+        hooks: {PreToolUse: [{matcher: "Bash", hooks: [{type: "command", command: $guard}]}],
+            Stop: [{hooks: [{type: "command", command: $notify}]}]}}' > "$home/.claude/settings.json"
+    printf '#!/bin/bash\nexec bash "%s/prompt.sh"\n' "$fork" > "$home/Documents/Cline/Hooks/UserPromptSubmit"
+    chmod +x "$home/Documents/Cline/Hooks/UserPromptSubmit"
+}
+
+test_foreign_unlazier_paths_kept() {
+    local home settings cline_hook seeded_settings seeded_json seeded_hook
+    echo "entries whose path only mentions unlazier are left alone"
+    home="$(new_home)"
+    seed_foreign_unlazier_paths "$home"
+    settings="$home/.claude/settings.json"
+    cline_hook="$home/Documents/Cline/Hooks/UserPromptSubmit"
+    seeded_settings="$(cksum < "$settings")"
+    seeded_json="$(jq -cS . "$settings")"
+    seeded_hook="$(cksum < "$cline_hook")"
+    run_uninstaller "$home" --harness claude,cline >/dev/null 2>&1
+
+    check "uninstall leaves settings.json as it was" test "$(cksum 2>/dev/null < "$settings")" = "$seeded_settings"
+    check "uninstall leaves the user's Cline hook" test "$(cksum 2>/dev/null < "$cline_hook")" = "$seeded_hook"
+    run_installer "$home" --harness claude,cline >/dev/null 2>&1
+    check "install keeps the user's guard and end-of-turn hook" json_has "$settings" \
+        '[.hooks[][].hooks[].command | select(contains("unlazier-fork/"))] | length == 2'
+    check "install keeps the user's status line" json_has "$settings" '.statusLine.command | endswith("unlazier-fork/status.sh\"")'
+    check "install does not replace the user's Cline hook" test "$(cksum < "$cline_hook")" = "$seeded_hook"
+    run_uninstaller "$home" --harness claude,cline >/dev/null 2>&1
+    check "uninstall after install restores the user's settings" test "$(jq -cS . "$settings" 2>/dev/null)" = "$seeded_json"
+}
+
 seed_v1_installation() {
     local home="$1"
     mkdir -p "$home/.claude/rules" "$home/.claude/skills"
@@ -667,6 +703,7 @@ main() {
     test_uninstall_restores_original_files
     test_config_files_rewritten_in_place
     test_temporary_file_names_unpredictable
+    test_foreign_unlazier_paths_kept
     test_v1_leftovers_removed_with_yes
     test_v1_leftovers_kept_without_confirmation
     test_upgrade_from_v2_0_layout
