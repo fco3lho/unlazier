@@ -956,6 +956,30 @@ test_statusline_temporary_file_unpredictable() {
     check "no temporary files left" test "$(find "$state_folder" -type f | wc -l | tr -d ' ')" = "2"
 }
 
+test_statusline_upgrade() {
+    local home settings script
+    echo "reinstalling refreshes Unlazier's own status line"
+    home="$(new_home)"
+    run_installer "$home" --harness claude >/dev/null 2>&1
+    settings="$home/.claude/settings.json"
+    script="$home/.claude/unlazier/claude-statusline.sh"
+    # An install from an earlier version: an older script, no refresh interval, a field the user added.
+    printf '#!/bin/bash\necho old\n' > "$script"
+    jq '.statusLine |= (del(.refreshInterval) + {padding: 2})' "$settings" > "$home/old.json" \
+        && mv "$home/old.json" "$settings"
+    run_installer "$home" --harness claude >/dev/null 2>&1
+
+    check "the status line script is the current one" cmp -s "$script" "$REPO_DIR/statusline/claude-statusline.sh"
+    check "a missing refresh interval is added" json_has "$settings" '.statusLine.refreshInterval == 60'
+    check "other status line fields are kept" json_has "$settings" '.statusLine.padding == 2'
+
+    jq --arg command "bash \"$home/.claude/unlazier-ai/claude-statusline.sh\"" '.statusLine.command = $command' \
+        "$settings" > "$home/legacy.json" && mv "$home/legacy.json" "$settings"
+    run_installer "$home" --harness claude >/dev/null 2>&1
+    check "a status line from the 2.0 folder points at the current script" json_has "$settings" \
+        ".statusLine.command == \"bash \\\"$home/.claude/unlazier/claude-statusline.sh\\\"\""
+}
+
 main() {
     command -v jq >/dev/null 2>&1 || { echo "jq is required to run these tests" >&2; exit 1; }
     test_install_preserves_user_content
@@ -986,6 +1010,7 @@ main() {
     test_upgrade_removes_obsolete_payload
     test_statusline_saves_usage
     test_statusline_temporary_file_unpredictable
+    test_statusline_upgrade
     test_cline_question_alert_filters_tools
     echo
     echo "$PASSED passed, $FAILED failed"
