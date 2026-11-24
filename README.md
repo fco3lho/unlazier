@@ -68,7 +68,7 @@ Unlazier adds four layers to each tool. Every tool gets the same four layers; on
 Open a terminal and run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/fco3lho/unlazier/main/install.sh | bash
+curl -fsSL https://github.com/fco3lho/unlazier/releases/latest/download/install.sh | bash
 ```
 
 The reminder and usage layers need **jq**, a small JSON tool. If it is missing, the installer still installs the rules and tells you the exact command to install jq for your system (for example `brew install jq` on macOS or `sudo apt-get install -y jq` on Ubuntu). Install it and run the installer again.
@@ -78,10 +78,32 @@ The reminder and usage layers need **jq**, a small JSON tool. If it is missing, 
 Open **PowerShell** and run:
 
 ```powershell
-irm https://raw.githubusercontent.com/fco3lho/unlazier/main/install.ps1 | iex
+irm https://github.com/fco3lho/unlazier/releases/latest/download/install.ps1 | iex
 ```
 
 Nothing else is needed on Windows.
+
+### Checking the script first
+
+Each release publishes its scripts with a `SHA256SUMS` file. To check a script before it runs, download it together with `SHA256SUMS`, verify it, and run your checked copy:
+
+```bash
+# Linux and macOS (if sha256sum is missing, use shasum -a 256)
+curl -fsSLO https://github.com/fco3lho/unlazier/releases/latest/download/install.sh
+curl -fsSLO https://github.com/fco3lho/unlazier/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS && bash install.sh
+```
+
+```powershell
+# Windows
+$base = 'https://github.com/fco3lho/unlazier/releases/latest/download'
+Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1 -UseBasicParsing
+Invoke-WebRequest "$base/SHA256SUMS" -OutFile SHA256SUMS -UseBasicParsing
+$expected = (Select-String -Path SHA256SUMS -Pattern ' install\.ps1$').Line.Split(' ')[0]
+if ((Get-FileHash install.ps1).Hash -eq $expected) { & ([scriptblock]::Create((Get-Content -Raw install.ps1))) } else { Write-Error 'install.ps1 does not match SHA256SUMS' }
+```
+
+Options such as `--harness claude` or `--uninstall` go after `bash install.sh` (Windows: `-Harness claude` or `-Uninstall`, right after `)))`).
 
 ### Choosing your tools
 
@@ -107,12 +129,12 @@ To pick tools in the command itself, which is useful for scripts:
 ./install.sh --harness claude,codex
 
 # Linux and macOS, without downloading
-curl -fsSL https://raw.githubusercontent.com/fco3lho/unlazier/main/install.sh | bash -s -- --harness claude,codex
+curl -fsSL https://github.com/fco3lho/unlazier/releases/latest/download/install.sh | bash -s -- --harness claude,codex
 ```
 
 ```powershell
 # Windows
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/fco3lho/unlazier/main/install.ps1))) -Harness claude,codex
+& ([scriptblock]::Create((irm https://github.com/fco3lho/unlazier/releases/latest/download/install.ps1))) -Harness claude,codex
 ```
 
 Tool names: `claude`, `opencode`, `codex`, `copilot`, `gemini`, `amp`, `kiro`, `cline`, `devin`, or `all`. Add `--yes` (Windows: `-Yes`) to answer "yes" to questions automatically.
@@ -198,13 +220,13 @@ Some tools signal fewer moments; see the Alerts column in [Supported Tools](#sup
 Linux and macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/fco3lho/unlazier/main/uninstall.sh | bash
+curl -fsSL https://github.com/fco3lho/unlazier/releases/latest/download/uninstall.sh | bash
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/fco3lho/unlazier/main/uninstall.ps1 | iex
+irm https://github.com/fco3lho/unlazier/releases/latest/download/uninstall.ps1 | iex
 ```
 
 The uninstaller shows the same menu and removes only what Unlazier added: the `unlazier-*.md` rule files, the marked blocks, its hooks, its plugins, its status line (only if it is the one Unlazier installed), and the `unlazier` folders. A file that becomes empty after the block is removed is deleted. Your own settings, history, and credentials stay.
@@ -308,12 +330,14 @@ Repository layout:
 | `statusline/` | Claude Code status line that saves usage for the reminder. |
 | `plugins/` | OpenCode and Amp plugins, which call the same hook script. |
 | `install.sh`, `install.ps1` | Installers; each tool is an adapter in one table. `uninstall.*` call them in uninstall mode. |
-| `tests/` | Installer and hook tests; `tests/fixtures/v1/` holds version 1 files for the upgrade tests. |
+| `scripts/` | `build-release-assets.sh` pins the installers and uninstallers to a release tag and writes `SHA256SUMS`; `.github/workflows/release.yml` runs it and uploads the result when a release is published. |
+| `tests/` | Installer, hook, and release asset tests; `tests/fixtures/v1/` holds version 1 files for the upgrade tests. |
 
 Run the tests:
 
 ```bash
 bash tests/install_test.sh        # Linux and macOS, needs jq
+bash tests/release_assets_test.sh # Linux and macOS
 ```
 
 ```powershell

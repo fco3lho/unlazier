@@ -70,7 +70,7 @@ Unlazier agrega cuatro capas a cada herramienta. Todas las herramientas reciben 
 Abre una terminal y ejecuta:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/fco3lho/unlazier/main/install.sh | bash
+curl -fsSL https://github.com/fco3lho/unlazier/releases/latest/download/install.sh | bash
 ```
 
 Las capas de recordatorio y de uso necesitan **jq**, una pequeña herramienta para JSON. Si no la tienes, el instalador igual instala las reglas y te muestra el comando exacto para instalar jq en tu sistema (por ejemplo `brew install jq` en macOS o `sudo apt-get install -y jq` en Ubuntu). Instálala y vuelve a ejecutar el instalador.
@@ -80,10 +80,32 @@ Las capas de recordatorio y de uso necesitan **jq**, una pequeña herramienta pa
 Abre **PowerShell** y ejecuta:
 
 ```powershell
-irm https://raw.githubusercontent.com/fco3lho/unlazier/main/install.ps1 | iex
+irm https://github.com/fco3lho/unlazier/releases/latest/download/install.ps1 | iex
 ```
 
 En Windows no necesitas nada más.
+
+### Cómo comprobar el script antes
+
+Cada versión publicada trae sus scripts con un archivo `SHA256SUMS`. Para comprobar un script antes de que se ejecute, descárgalo junto con `SHA256SUMS`, verifícalo y ejecuta tu copia comprobada:
+
+```bash
+# Linux and macOS (if sha256sum is missing, use shasum -a 256)
+curl -fsSLO https://github.com/fco3lho/unlazier/releases/latest/download/install.sh
+curl -fsSLO https://github.com/fco3lho/unlazier/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS && bash install.sh
+```
+
+```powershell
+# Windows
+$base = 'https://github.com/fco3lho/unlazier/releases/latest/download'
+Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1 -UseBasicParsing
+Invoke-WebRequest "$base/SHA256SUMS" -OutFile SHA256SUMS -UseBasicParsing
+$expected = (Select-String -Path SHA256SUMS -Pattern ' install\.ps1$').Line.Split(' ')[0]
+if ((Get-FileHash install.ps1).Hash -eq $expected) { & ([scriptblock]::Create((Get-Content -Raw install.ps1))) } else { Write-Error 'install.ps1 does not match SHA256SUMS' }
+```
+
+Opciones como `--harness claude` o `--uninstall` van después de `bash install.sh` (en Windows: `-Harness claude` o `-Uninstall`, justo después de `)))`).
 
 ### Cómo elegir tus herramientas
 
@@ -109,12 +131,12 @@ Para elegir las herramientas en el mismo comando, algo útil en scripts:
 ./install.sh --harness claude,codex
 
 # Linux and macOS, without downloading
-curl -fsSL https://raw.githubusercontent.com/fco3lho/unlazier/main/install.sh | bash -s -- --harness claude,codex
+curl -fsSL https://github.com/fco3lho/unlazier/releases/latest/download/install.sh | bash -s -- --harness claude,codex
 ```
 
 ```powershell
 # Windows
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/fco3lho/unlazier/main/install.ps1))) -Harness claude,codex
+& ([scriptblock]::Create((irm https://github.com/fco3lho/unlazier/releases/latest/download/install.ps1))) -Harness claude,codex
 ```
 
 Nombres de las herramientas: `claude`, `opencode`, `codex`, `copilot`, `gemini`, `amp`, `kiro`, `cline`, `devin` o `all`. Agrega `--yes` (en Windows: `-Yes`) para responder "sí" automáticamente a las preguntas.
@@ -200,13 +222,13 @@ Algunas herramientas avisan en menos momentos; mira la columna Alertas en [Herra
 Linux y macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/fco3lho/unlazier/main/uninstall.sh | bash
+curl -fsSL https://github.com/fco3lho/unlazier/releases/latest/download/uninstall.sh | bash
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/fco3lho/unlazier/main/uninstall.ps1 | iex
+irm https://github.com/fco3lho/unlazier/releases/latest/download/uninstall.ps1 | iex
 ```
 
 El desinstalador muestra el mismo menú y elimina solo lo que agregó Unlazier: los archivos de reglas `unlazier-*.md`, los bloques marcados, sus hooks, sus plugins, su barra de estado (solo si es la que instaló Unlazier) y las carpetas `unlazier`. Un archivo que queda vacío después de quitar el bloque se elimina. Tu propia configuración, tu historial y tus credenciales se quedan donde están.
@@ -310,12 +332,14 @@ Estructura del repositorio:
 | `statusline/` | Barra de estado de Claude Code que guarda el uso para el recordatorio. |
 | `plugins/` | Plugins de OpenCode y Amp, que llaman al mismo script del hook. |
 | `install.sh`, `install.ps1` | Instaladores; cada herramienta es un adaptador dentro de una sola tabla. Los `uninstall.*` los llaman en modo de desinstalación. |
-| `tests/` | Pruebas del instalador y del hook; `tests/fixtures/v1/` contiene archivos de la versión 1 para las pruebas de actualización. |
+| `scripts/` | `build-release-assets.sh` fija los instaladores y desinstaladores en la etiqueta de una versión y genera `SHA256SUMS`; `.github/workflows/release.yml` lo ejecuta y sube el resultado cuando se publica una versión. |
+| `tests/` | Pruebas del instalador, del hook y de los archivos de cada versión; `tests/fixtures/v1/` contiene archivos de la versión 1 para las pruebas de actualización. |
 
 Ejecuta las pruebas:
 
 ```bash
 bash tests/install_test.sh        # Linux and macOS, needs jq
+bash tests/release_assets_test.sh # Linux and macOS
 ```
 
 ```powershell
