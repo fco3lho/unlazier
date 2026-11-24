@@ -452,9 +452,44 @@ render_rules() {
     done
 }
 
-# Replaces the block between the markers, or appends it when the file has none.
+# A block runs from a start marker line to the next end marker line. A start marker followed by
+# another start marker, or by none, opens no block: it stays as text, with the user's lines after
+# it, which a broken block would otherwise swallow up to the end of the file.
+
+# Prints the number of blocks and the number of start markers that open none.
+count_markers() {
+    awk -v start="$2" -v end="$3" '
+        $0 == start { unclosed += open; open = 1; next }
+        open && $0 == end { blocks++; open = 0 }
+        END { print blocks + 0, unclosed + open }
+    ' "$1"
+}
+
+# Prints the file with each block replaced by the block file's content (only the first block
+# receives it, so duplicates collapse into one), or removed when no block file is given.
+rewrite_blocks() {
+    local file="$1" start="$2" end="$3" block_file="${4:-}"
+    awk -v start="$start" -v end="$end" -v block="$block_file" '
+        function release(   i) { for (i = 1; i <= held; i++) print lines[i]; held = 0 }
+        $0 == start { release(); held = 1; lines[1] = $0; next }
+        held && $0 == end {
+            held = 0
+            if (block != "") while ((getline line < block) > 0) print line
+            next
+        }
+        held { lines[++held] = $0; next }
+        { print }
+        END { release() }
+    ' "$file"
+}
+
+report_unclosed_marker() {
+    add_notice "$1 has a '$2' line with no '$3' line after it; that line and the text after it were kept. Delete the stray line by hand."
+}
+
+# Replaces the block, or appends one when the file has none.
 write_block() {
-    local file="$1" block_file
+    local file="$1" block_file blocks=0 unclosed=0
     mkdir -p "$(dirname "$file")"
     block_file="$(mktemp)"
     {
@@ -463,12 +498,15 @@ write_block() {
         echo "$MARKER_END"
     } > "$block_file"
 
-    if [ -f "$file" ] && grep -qxF "$MARKER_START" "$file"; then
-        rewrite_file "$file" awk -v start="$MARKER_START" -v end="$MARKER_END" -v block="$block_file" '
-            $0 == start { while ((getline line < block) > 0) print line; skipping = 1; next }
-            skipping && $0 == end { skipping = 0; next }
-            !skipping { print }
-        ' "$file" || { rm -f "$block_file"; die "could not update $file"; }
+    if [ -f "$file" ]; then
+        read -r blocks unclosed < <(count_markers "$file" "$MARKER_START" "$MARKER_END")
+    fi
+    if [ "$unclosed" -gt 0 ]; then
+        report_unclosed_marker "$file" "$MARKER_START" "$MARKER_END"
+    fi
+    if [ "$blocks" -gt 0 ]; then
+        rewrite_file "$file" rewrite_blocks "$file" "$MARKER_START" "$MARKER_END" "$block_file" \
+            || { rm -f "$block_file"; die "could not update $file"; }
     else
         # A file without a final newline would glue the marker to its last line.
         if [ -s "$file" ] && [ -n "$(tail -c 1 "$file")" ]; then
@@ -482,13 +520,14 @@ write_block() {
 # Removes the block (marked with the current markers unless others are given); deletes the
 # file when only whitespace is left.
 remove_block() {
-    local file="$1" start="${2:-$MARKER_START}" end="${3:-$MARKER_END}"
+    local file="$1" start="${2:-$MARKER_START}" end="${3:-$MARKER_END}" blocks unclosed
     [ -f "$file" ] && grep -qxF "$start" "$file" || return 0
-    rewrite_file "$file" awk -v start="$start" -v end="$end" '
-        $0 == start { skipping = 1; next }
-        skipping && $0 == end { skipping = 0; next }
-        !skipping { print }
-    ' "$file" || die "could not update $file"
+    read -r blocks unclosed < <(count_markers "$file" "$start" "$end")
+    if [ "$unclosed" -gt 0 ]; then
+        report_unclosed_marker "$file" "$start" "$end"
+    fi
+    [ "$blocks" -gt 0 ] || return 0
+    rewrite_file "$file" rewrite_blocks "$file" "$start" "$end" || die "could not update $file"
     if ! grep -q '[^[:space:]]' "$file"; then
         rm -f "$file"
     fi

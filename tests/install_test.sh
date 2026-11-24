@@ -334,6 +334,31 @@ test_foreign_unlazier_paths_kept() {
     check "uninstall after install restores the user's settings" test "$(jq -cS . "$settings" 2>/dev/null)" = "$seeded_json"
 }
 
+test_unclosed_marker_keeps_text() {
+    local home file original output notice
+    echo "a start marker without an end marker keeps the text after it"
+    home="$(new_home)"
+    file="$home/.codex/AGENTS.md"
+    mkdir -p "$home/.codex"
+    printf '# Codex notes\n<!-- unlazier:start -->\nKeep this line.\n' > "$file"
+    original="$(cksum < "$file")"
+    notice="$file has a '<!-- unlazier:start -->' line with no '<!-- unlazier:end -->' line after it"
+    output="$(run_installer "$home" --harness codex 2>&1)"
+
+    check "install keeps the text after the marker" contains_line "$file" "Keep this line."
+    check "install appends a rules block" test "$(tail -n 1 "$file")" = "<!-- unlazier:end -->"
+    check "install names the file in a notice" test -n "$(printf '%s' "$output" | grep -F "$notice")"
+    run_installer "$home" --harness codex >/dev/null 2>&1
+    check "reinstall keeps the text" contains_line "$file" "Keep this line."
+    check "reinstall keeps one complete block" test "$(grep -cxF '<!-- unlazier:end -->' "$file")" = "1"
+    output="$(run_uninstaller "$home" --harness codex 2>&1)"
+    check "uninstall removes only the complete block" test "$(cksum < "$file")" = "$original"
+    check "uninstall names the file in a notice" test -n "$(printf '%s' "$output" | grep -F "$notice")"
+    output="$(run_uninstaller "$home" --harness codex 2>&1)"
+    check "uninstall without a complete block leaves the file unchanged" test "$(cksum < "$file")" = "$original"
+    check "and names the file in a notice" test -n "$(printf '%s' "$output" | grep -F "$notice")"
+}
+
 seed_v1_installation() {
     local home="$1"
     mkdir -p "$home/.claude/rules" "$home/.claude/skills"
@@ -704,6 +729,7 @@ main() {
     test_config_files_rewritten_in_place
     test_temporary_file_names_unpredictable
     test_foreign_unlazier_paths_kept
+    test_unclosed_marker_keeps_text
     test_v1_leftovers_removed_with_yes
     test_v1_leftovers_kept_without_confirmation
     test_upgrade_from_v2_0_layout

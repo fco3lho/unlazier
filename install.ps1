@@ -710,33 +710,68 @@ param(
         return $false
     }
 
-    # Replaces the lines from the start marker to the end marker with $Block, or drops them when
-    # $Block is $null. Every other line keeps its exact bytes, including CRLF endings.
+    # A block runs from a start marker line to the next end marker line. A start marker followed
+    # by another start marker, or by none, opens no block: it stays as text, with the user's lines
+    # after it, which a broken block would otherwise swallow up to the end of the file.
+
+    # Counts the blocks and the start markers that open none.
+    function Get-MarkerCounts {
+        param([string]$Text, [string]$Start, [string]$End)
+        $blocks = 0
+        $unclosed = 0
+        $isOpen = $false
+        foreach ($line in ($Text -split "`n")) {
+            $bareLine = $line.TrimEnd("`r")
+            if ($bareLine -eq $Start) {
+                if ($isOpen) {
+                    $unclosed++
+                }
+                $isOpen = $true
+            } elseif ($isOpen -and $bareLine -eq $End) {
+                $blocks++
+                $isOpen = $false
+            }
+        }
+        if ($isOpen) {
+            $unclosed++
+        }
+        return [pscustomobject]@{ Blocks = $blocks; Unclosed = $unclosed }
+    }
+
+    # Replaces each block with $Block, or drops it when $Block is $null. Every other line keeps
+    # its exact bytes, including CRLF endings.
     function Set-MarkedBlock {
         param([string]$Text, $Block, [string]$Start = $MarkerStart, [string]$End = $MarkerEnd)
         $result = New-Object System.Collections.Generic.List[string]
-        $isSkipping = $false
+        # Lines from a start marker on, held until an end marker shows they form a block.
+        $held = New-Object System.Collections.Generic.List[string]
         foreach ($line in ($Text -split "`n")) {
             $bareLine = $line.TrimEnd("`r")
-            if ($isSkipping) {
-                if ($bareLine -eq $End) {
-                    $isSkipping = $false
-                }
-                continue
-            }
             if ($bareLine -eq $Start) {
+                $result.AddRange($held)
+                $held.Clear()
+                $held.Add($line)
+            } elseif ($held.Count -gt 0 -and $bareLine -eq $End) {
+                $held.Clear()
                 if ($null -ne $Block) {
                     $result.Add($Block)
                 }
-                $isSkipping = $true
-                continue
+            } elseif ($held.Count -gt 0) {
+                $held.Add($line)
+            } else {
+                $result.Add($line)
             }
-            $result.Add($line)
         }
+        $result.AddRange($held)
         return ($result -join "`n")
     }
 
-    # Replaces the block between the markers, or appends it when the file has none.
+    function Add-UnclosedMarkerNotice {
+        param([string]$Path, [string]$Start, [string]$End)
+        Add-Notice "$Path has a '$Start' line with no '$End' line after it; that line and the text after it were kept. Delete the stray line by hand."
+    }
+
+    # Replaces the block, or appends one when the file has none.
     function Write-RulesBlock {
         param([string]$Path)
         $block = $MarkerStart + "`n" + (Get-RulesText) + $MarkerEnd
@@ -745,7 +780,11 @@ param(
             return
         }
         $file = Read-TextFile $Path
-        if (Test-HasMarker $file.Text) {
+        $counts = Get-MarkerCounts $file.Text $MarkerStart $MarkerEnd
+        if ($counts.Unclosed -gt 0) {
+            Add-UnclosedMarkerNotice $Path $MarkerStart $MarkerEnd
+        }
+        if ($counts.Blocks -gt 0) {
             Write-TextFile $Path (Set-MarkedBlock $file.Text $block) $file.HasBom
             return
         }
@@ -765,7 +804,11 @@ param(
             return
         }
         $file = Read-TextFile $Path
-        if (-not (Test-HasMarker $file.Text $Start)) {
+        $counts = Get-MarkerCounts $file.Text $Start $End
+        if ($counts.Unclosed -gt 0) {
+            Add-UnclosedMarkerNotice $Path $Start $End
+        }
+        if ($counts.Blocks -eq 0) {
             return
         }
         $remaining = Set-MarkedBlock $file.Text $null $Start $End

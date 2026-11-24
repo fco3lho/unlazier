@@ -534,6 +534,36 @@ function Test-ForeignUnlazierPathsKept {
     }
 }
 
+function Test-HasLine {
+    param([string[]]$Lines, [string]$Text)
+    return @($Lines | Where-Object { $_.Contains($Text) }).Count -gt 0
+}
+
+function Test-UnclosedMarkerKeepsText {
+    Write-Host 'a start marker without an end marker keeps the text after it'
+    $testHome = New-TestHome
+    $path = Join-TestPath $testHome '.codex/AGENTS.md'
+    $original = "# Codex notes`n<!-- unlazier:start -->`nKeep this line.`n"
+    Write-TestFile $path $original
+    $notice = "$path has a '<!-- unlazier:start -->' line with no '<!-- unlazier:end -->' line after it"
+    $result = Invoke-Installer $testHome @('-Harness', 'codex')
+
+    Assert-That 'install keeps the text after the marker' { Test-ContainsLine $path 'Keep this line.' }
+    Assert-That 'install appends a rules block' { [System.IO.File]::ReadAllText($path).EndsWith("<!-- unlazier:end -->`n") }
+    Assert-That 'install names the file in a notice' { Test-HasLine $result.Lines $notice }
+    [void](Invoke-Installer $testHome @('-Harness', 'codex'))
+    Assert-That 'reinstall keeps the text' { Test-ContainsLine $path 'Keep this line.' }
+    Assert-That 'reinstall keeps one complete block' {
+        @([System.IO.File]::ReadAllText($path) -split "`n" | Where-Object { $_ -eq '<!-- unlazier:end -->' }).Count -eq 1
+    }
+    $result = Invoke-Uninstaller $testHome @('-Harness', 'codex')
+    Assert-That 'uninstall removes only the complete block' { [System.IO.File]::ReadAllText($path) -eq $original }
+    Assert-That 'uninstall names the file in a notice' { Test-HasLine $result.Lines $notice }
+    $result = Invoke-Uninstaller $testHome @('-Harness', 'codex')
+    Assert-That 'uninstall without a complete block leaves the file unchanged' { [System.IO.File]::ReadAllText($path) -eq $original }
+    Assert-That 'and names the file in a notice' { Test-HasLine $result.Lines $notice }
+}
+
 function Initialize-V1Installation {
     param([string]$TestHome)
     $v1 = [System.IO.Path]::Combine($FixturesDirectory, 'v1')
@@ -996,6 +1026,7 @@ try {
     Test-UninstallRestoresOriginalFiles
     Test-ConfigFilesRewrittenInPlace
     Test-ForeignUnlazierPathsKept
+    Test-UnclosedMarkerKeepsText
     Test-V1LeftoversRemovedWithYes
     Test-V1LeftoversKeptWithoutConfirmation
     Test-UpgradeFromV20Layout
