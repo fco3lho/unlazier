@@ -2,17 +2,20 @@
 
 All notable changes to Unlazier (called Unlazier AI before version 2.1) are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.2.0] - 2026-11-23
 
 ### Added
 
 - **Project rules in the reminder:** with each message, the reminder names the project's own rules file (`CLAUDE.md` or `.claude/CLAUDE.md` for Claude Code, `AGENTS.md` for Codex CLI, OpenCode, and Amp, `GEMINI.md` for Gemini CLI) and up to 12 of its sections, so the project's rules keep their weight between compactions. The file itself is not repeated, because Claude Code already re-reads the project-root `CLAUDE.md` after each compaction.
-- **A background wait for the usage window** (`wait-usage.sh`, and `wait-usage.ps1` on Windows), installed for Claude Code to `~/.claude/unlazier/`. It reads the usage the status line saves and ends with one line (`reset`, `dropped`, `threshold`, or `timeout`) that wakes the session. It captures the reset time once at start, because `resets_at` moves to the next cycle at the reset.
 
 ### Changed
 
-- **Usage ladder:** from 85%, agents already running finish their current step and nothing new starts. At 95% or more the assistant stops the running agents, waits in the background for the window to reset, and resumes on its own instead of ending the turn. Tools other than Claude Code keep finishing the step, reporting, and waiting for you.
+- **Usage ladder:** from 85%, agents already running finish their current step and nothing new starts. At 95% or more the assistant stops starting new work and finishes the current step. At the usage limit it follows the tool's own wait and resume behavior and the user's choice instead of running a separate waiter. Tools without a native wait keep finishing the step, reporting, and waiting for you.
 - The Claude Code status line installed by Unlazier refreshes every minute (`refreshInterval: 60`), not only when a message is sent, so the usage saved for the reminder stays current while you are idle.
+
+### Removed
+
+- The `wait-usage.sh` and `wait-usage.ps1` background waiters. Claude Code v2.1.234 or later waits in the open session and resumes after a usage limit reset according to the user's choice (`autoContinueAtUsageLimit` and `/rate-limit-options`), so Unlazier no longer duplicates it. The installer deletes copies left by earlier versions from existing Unlazier folders.
 
 ## [2.1.0] - 2026-11-14
 
