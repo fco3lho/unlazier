@@ -24,19 +24,52 @@ MAX_READING_AGE_SECONDS=900
 # go stale, so it counts as stale at once.
 MAX_CLOCK_SKEW_SECONDS=300
 MAX_SECTION_TITLES=12
+MAX_TITLE_CHARACTERS=60
+MAX_TITLE_LIST_CHARACTERS=400
+MAX_PROJECT_RULES_BYTES=65536
 
-# The "## " titles of a Markdown file, comma-separated, skipping fenced code blocks.
-# shellcheck disable=SC2016  # awk program, not a shell expansion
-SECTION_TITLES_PROGRAM='
-/^(```|~~~)/ { fenced = !fenced; next }
-!fenced && /^## / {
-    title = $0
-    sub(/^## +/, "", title)
-    sub(/[ \t\r]+$/, "", title)
-    count++
-    if (count <= max) titles = titles (count > 1 ? ", " : "") title
-}
-END { if (count > max) titles = titles ", ..."; print titles }
+# The project rules line, from the "## " titles of a Markdown file read on standard input. The file
+# comes from the repository but reaches the model as Unlazier's own text, so headings hidden from
+# readers (in fenced code or HTML comments) are skipped, control and bidirectional characters are
+# removed, and titles and their list are capped. Lengths count code points, as in inject.ps1.
+# shellcheck disable=SC2016  # jq program, not a shell expansion
+PROJECT_RULES_PROGRAM='
+def fence: startswith("```") or startswith("~~~");
+# The part of a line outside HTML comments, and whether a comment is still open at its end.
+def outside_comments($commented):
+    if $commented then
+        if index("-->") != null then sub("^.*?-->"; "") | outside_comments(false) else {text: "", commented: true} end
+    elif index("<!--") != null then
+        gsub("<!--.*?-->"; "")
+        | if index("<!--") != null then {text: sub("<!--.*$"; ""), commented: true} else {text: ., commented: false} end
+    else {text: ., commented: false} end;
+# Code points of category Cc, and the bidirectional controls U+202A-U+202E and U+2066-U+2069.
+def control: . < 32 or (. >= 127 and . < 160);
+def bidirectional: (. >= 8234 and . <= 8238) or (. >= 8294 and . <= 8297);
+def title: .[3:] | explode | map(select(control or bidirectional | not))
+    | until(length == 0 or .[0] != 32; .[1:]) | until(length == 0 or .[-1] != 32; .[:-1])
+    | if length > $max_title then (.[:$max_title] | implode) + "..." else implode end;
+# One title past the cap is enough to know that the list leaves some out.
+(reduce inputs as $line ({fenced: false, commented: false, titles: []};
+    if (.titles | length) > $max_titles then .
+    elif .fenced then .fenced = ($line | fence | not)
+    elif (.commented | not) and ($line | fence) then .fenced = true
+    else .commented as $commented
+        | ($line | outside_comments($commented)) as $visible
+        | .commented = $visible.commented
+        | if ($commented | not) and ($line | startswith("## ")) then
+            .titles += [$visible.text | title | select(. != "")]
+          else . end
+    end).titles
+    | reduce .[] as $title ({titles: [], characters: 0, omitted: false};
+        (.characters + (if .titles == [] then 0 else 2 end) + ($title | length)) as $characters
+        | if .omitted then .
+          elif (.titles | length) == $max_titles or $characters > $max_characters then .omitted = true
+          else .titles += [$title] | .characters = $characters end)
+    | (.titles | join(", ")) + (if .omitted then ", ..." else "" end)) as $titles
+| ($path | explode | map(select(control | not)) | implode) as $file
+| if $titles == "" then "- Project rules: \($file) apply; re-read the relevant section before acting on it."
+    else "- Project rules: \($file) apply (\($titles)); re-read the relevant section before acting on it." end
 '
 
 # Normalized usage reading: {"five_hour": <percent|null>, "weekly": <percent|null>, "captured_at": <epoch|null>}.
@@ -179,16 +212,13 @@ project_rules_file() {
 # The project's rules lose weight between compactions like the global ones, but repeating the
 # whole file on every prompt would fill the context, so the reminder names it and its sections.
 project_rules_line() {
-    local file titles
+    local file
     file="$(project_rules_file "$1")" || return 0
     # A file that cannot be read still gets its line, without sections: the reminder must not
     # break, and the path lets the agent open the file and see the error itself.
-    titles="$(awk -v max="$MAX_SECTION_TITLES" "$SECTION_TITLES_PROGRAM" "$file" 2>/dev/null)" || titles=""
-    if [ -n "$titles" ]; then
-        echo "- Project rules: $file apply ($titles); re-read the relevant section before acting on it."
-    else
-        echo "- Project rules: $file apply; re-read the relevant section before acting on it."
-    fi
+    head -c "$MAX_PROJECT_RULES_BYTES" "$file" 2>/dev/null | jq -nrR --arg path "$file" \
+        --argjson max_titles "$MAX_SECTION_TITLES" --argjson max_title "$MAX_TITLE_CHARACTERS" \
+        --argjson max_characters "$MAX_TITLE_LIST_CHARACTERS" "$PROJECT_RULES_PROGRAM"
 }
 
 build_context() {

@@ -26,6 +26,12 @@ $MaxReadingAgeSeconds = 900
 # go stale, so it counts as stale at once.
 $MaxClockSkewSeconds = 300
 $MaxSectionTitles = 12
+$MaxTitleCharacters = 60
+$MaxTitleListCharacters = 400
+$MaxProjectRulesBytes = 65536
+# Control characters and the bidirectional controls U+202A-U+202E and U+2066-U+2069, built from
+# code points so that this file stays ASCII.
+$HiddenTitleCharacters = '[\p{Cc}' + [char]0x202A + '-' + [char]0x202E + [char]0x2066 + '-' + [char]0x2069 + ']'
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 # Opens the file with FileShare.ReadWrite because Codex keeps its session log open for
@@ -40,6 +46,24 @@ function Read-SharedText {
         } finally {
             $reader.Dispose()
         }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+# Reads at most the first $MaxBytes bytes, as head -c does in inject.sh. Like jq there, the decoder
+# keeps a byte order mark as text and turns invalid or cut UTF-8 sequences into U+FFFD.
+function Read-SharedTextPrefix {
+    param([string]$Path, [int]$MaxBytes)
+    $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+    try {
+        $buffer = New-Object byte[] $MaxBytes
+        $count = 0
+        do {
+            $read = $stream.Read($buffer, $count, $MaxBytes - $count)
+            $count += $read
+        } while ($read -gt 0 -and $count -lt $MaxBytes)
+        return $Utf8NoBom.GetString($buffer, 0, $count)
     } finally {
         $stream.Dispose()
     }
@@ -318,29 +342,81 @@ function Find-ProjectRulesFile {
     return $null
 }
 
-# The "## " titles of a Markdown file, comma-separated, skipping fenced code blocks.
+# Removes control characters (category Cc) and bidirectional controls, trims spaces, and cuts the
+# title to $MaxTitleCharacters code points, as inject.sh does.
+function Format-SectionTitle {
+    param([string]$Text)
+    $title = ($Text -replace $HiddenTitleCharacters, '').Trim(' ')
+    $codePoints = [System.Text.Encoding]::UTF32.GetBytes($title)
+    if ($codePoints.Length -gt 4 * $MaxTitleCharacters) {
+        return [System.Text.Encoding]::UTF32.GetString($codePoints, 0, 4 * $MaxTitleCharacters) + '...'
+    }
+    return $title
+}
+
+# Keeps at most $MaxSectionTitles titles and stops before the list would pass
+# $MaxTitleListCharacters code points; ", ..." marks titles left out.
+function Join-SectionTitles {
+    param([System.Collections.Generic.List[string]]$Titles)
+    $kept = New-Object System.Collections.Generic.List[string]
+    $characters = 0
+    foreach ($title in $Titles) {
+        $length = $characters + [System.Text.Encoding]::UTF32.GetByteCount($title) / 4
+        if ($kept.Count -gt 0) {
+            $length += 2
+        }
+        if ($kept.Count -eq $MaxSectionTitles -or $length -gt $MaxTitleListCharacters) {
+            return ($kept -join ', ') + ', ...'
+        }
+        $kept.Add($title)
+        $characters = $length
+    }
+    return $kept -join ', '
+}
+
+# The "## " titles of a Markdown file, comma-separated. The file comes from the repository but
+# reaches the model as Unlazier's own text, so headings hidden from readers (in fenced code or HTML
+# comments) are skipped and titles are cleaned and capped, as in inject.sh.
 function Get-SectionTitles {
     param([string]$Path)
     $titles = New-Object System.Collections.Generic.List[string]
-    $count = 0
     $isFenced = $false
-    foreach ($line in ((Read-SharedText $Path) -split "`n")) {
-        if ($line -match '^(```|~~~)') {
-            $isFenced = -not $isFenced
+    $isCommented = $false
+    foreach ($line in ((Read-SharedTextPrefix $Path $MaxProjectRulesBytes) -split "`n")) {
+        # One title past the cap is enough to know that the list leaves some out.
+        if ($titles.Count -gt $MaxSectionTitles) {
+            break
+        }
+        if ($isFenced) {
+            $isFenced = $line -notmatch '^(```|~~~)'
             continue
         }
-        if (-not $isFenced -and $line -match '^## +(.*)$') {
-            $count++
-            if ($count -le $MaxSectionTitles) {
-                $titles.Add($Matches[1].TrimEnd(' ', "`t", "`r"))
+        if (-not $isCommented -and $line -match '^(```|~~~)') {
+            $isFenced = $true
+            continue
+        }
+        $isHeading = -not $isCommented -and $line.StartsWith('## ', [System.StringComparison]::Ordinal)
+        $visible = $line
+        if ($isCommented) {
+            if (-not $line.Contains('-->')) {
+                continue
+            }
+            $visible = $line -replace '^.*?-->', ''
+            $isCommented = $false
+        }
+        $visible = $visible -replace '<!--.*?-->', ''
+        if ($visible.Contains('<!--')) {
+            $visible = $visible -replace '<!--.*$', ''
+            $isCommented = $true
+        }
+        if ($isHeading) {
+            $title = Format-SectionTitle $visible.Substring(3)
+            if ($title -ne '') {
+                $titles.Add($title)
             }
         }
     }
-    $text = $titles -join ', '
-    if ($count -gt $MaxSectionTitles) {
-        $text += ', ...'
-    }
-    return $text
+    return Join-SectionTitles $titles
 }
 
 # The project's rules lose weight between compactions like the global ones, but repeating the
@@ -358,10 +434,11 @@ function Get-ProjectRulesLine {
     } catch [System.IO.IOException], [System.UnauthorizedAccessException] {
         $titles = ''
     }
+    $displayPath = $path -replace '\p{Cc}', ''
     if ($titles) {
-        return "- Project rules: $path apply ($titles); re-read the relevant section before acting on it.`n"
+        return "- Project rules: $displayPath apply ($titles); re-read the relevant section before acting on it.`n"
     }
-    return "- Project rules: $path apply; re-read the relevant section before acting on it.`n"
+    return "- Project rules: $displayPath apply; re-read the relevant section before acting on it.`n"
 }
 
 # Mirrors the shell version: the pieces are printed in order and command substitution
