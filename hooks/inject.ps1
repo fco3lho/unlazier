@@ -468,7 +468,9 @@ function Get-Context {
 }
 
 # Claude Code passes the tool call as JSON on standard input. A subagent launched in the background
-# returns at once, so a usage line after it would repeat the reading the model already has.
+# returns at once, so a usage line after it would repeat the reading the model already has. Claude
+# Code also sends subagents to the background on its own, without run_in_background, so the result
+# status counts too.
 function Test-BackgroundSubagent {
     if (-not [Console]::IsInputRedirected) {
         return $false
@@ -480,7 +482,8 @@ function Test-BackgroundSubagent {
         return $false
     }
     $isBackground = Get-JsonProperty (Get-JsonProperty $hookInput 'tool_input') 'run_in_background'
-    return $isBackground -is [bool] -and $isBackground
+    $status = Get-JsonProperty (Get-JsonProperty $hookInput 'tool_response') 'status'
+    return ($isBackground -is [bool] -and $isBackground) -or ($status -is [string] -and $status -in @('async_launched', 'remote_launched'))
 }
 
 # Escapes a string the way jq does: control characters as \u00xx, non-ASCII left as UTF-8.

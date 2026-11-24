@@ -874,6 +874,13 @@ test_inject_background_subagent() {
         test "$(printf '%s' "$background" | bash "$inject" claude subagent; echo "exit $?")" = "exit 0"
     check "a foreground launch reports usage" json_has \
         <(printf '%s' '{"tool_input":{"run_in_background":false}}' | bash "$inject" claude subagent) "$reports_usage"
+    check "a launch Claude Code sent to the background prints nothing" test "$(printf '%s' \
+        '{"tool_input":{"prompt":"x"},"tool_response":{"status":"async_launched","agentId":"a1"}}' \
+        | bash "$inject" claude subagent; echo "exit $?")" = "exit 0"
+    check "a remote launch prints nothing" test "$(printf '%s' '{"tool_response":{"status":"remote_launched"}}' \
+        | bash "$inject" claude subagent; echo "exit $?")" = "exit 0"
+    check "a completed subagent reports usage" json_has \
+        <(printf '%s' '{"tool_response":{"status":"completed"}}' | bash "$inject" claude subagent) "$reports_usage"
     check "invalid hook input reports usage" json_has <(printf 'not json' | bash "$inject" claude subagent) "$reports_usage"
     check "empty hook input reports usage" json_has <(bash "$inject" claude subagent </dev/null) "$reports_usage"
     check "closed standard input reports usage" json_has <(bash "$inject" claude subagent <&-) "$reports_usage"

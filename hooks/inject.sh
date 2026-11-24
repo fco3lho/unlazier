@@ -258,13 +258,16 @@ build_context() {
 }
 
 # Claude Code passes the tool call as JSON on standard input. A subagent launched in the background
-# returns at once, so a usage line after it would repeat the reading the model already has. jq reads
-# standard input directly: with it closed, a command substitution would hand jq its own output pipe.
+# returns at once, so a usage line after it would repeat the reading the model already has. Claude
+# Code also sends subagents to the background on its own, without run_in_background, so the result
+# status counts too. jq reads standard input directly: with it closed, a command substitution would
+# hand jq its own output pipe.
 is_background_subagent() {
     if [ "$1" != claude ] || [ -t 0 ]; then
         return 1
     fi
-    jq -e '.tool_input.run_in_background == true' >/dev/null 2>&1
+    jq -e '.tool_input.run_in_background == true
+        or (.tool_response.status | IN("async_launched", "remote_launched"))' >/dev/null 2>&1
 }
 
 # Each harness expects its own output shape; see the adapter table in README.md.
