@@ -148,11 +148,11 @@ Assinaturas como as do Claude e do ChatGPT limitam quanto você pode usar numa j
 | abaixo de 70% | Roda em paralelo o máximo de trabalho que conseguir |
 | de 70% a 85% | Roda no máximo 2 tarefas ao mesmo tempo |
 | de 85% a 95% | Trabalha numa tarefa por vez, sem agentes auxiliares |
-| 95% ou mais | Para os agentes auxiliares em andamento, espera em segundo plano a janela reiniciar e retoma o trabalho sozinho |
+| 95% ou mais | Para de começar trabalho novo e termina o passo atual; a ferramenta decide se espera e retoma após o limite |
 
 Quando a janela **semanal** chega a 99%, o assistente termina o passo atual, avisa você e espera.
 
-No **Claude Code**, a espera aos 95% é um script que o Unlazier instala (`~/.claude/unlazier/wait-usage.sh`, ou `wait-usage.ps1` no Windows). Ele lê o uso salvo e termina quando a janela reinicia, o que acorda o assistente. As outras ferramentas não são acordadas por uma tarefa em segundo plano, então terminam o passo atual, avisam você e esperam.
+No **limite de uso**, o Claude Code v2.1.234 ou mais recente espera na sessão aberta e retoma após o reinício de um limite da assinatura claude.ai. Isso vem ligado por padrão, e você controla com `autoContinueAtUsageLimit` nas configurações de usuário, no `/config` ou no `/rate-limit-options` (onde também pode cancelar uma espera). O Unlazier não altera essa configuração nem inicia uma espera própria: o assistente segue a sua escolha. Quando a ferramenta não oferece espera — outras ferramentas, versões antigas, execuções `-p` ou chaves de API —, o assistente termina o passo atual, avisa você e espera. O Claude Code para após três retomadas automáticas.
 
 Quando paraleliza, ele prefere, nesta ordem: agentes auxiliares para partes da mesma tarefa, depois tarefas diferentes do mesmo pedido, depois pedidos diferentes.
 
@@ -299,7 +299,6 @@ Organização do repositório:
 | `reminder.md` | O lembrete curto (camada 2). |
 | `hooks/inject.sh`, `hooks/inject.ps1` | Imprime o lembrete e a linha de uso (camadas 2 e 3) no formato que cada ferramenta espera. |
 | `hooks/alert.sh`, `hooks/alert.ps1` | Toca os bipes de alerta (camada 4). |
-| `hooks/wait-usage.sh`, `hooks/wait-usage.ps1` | Espera em segundo plano uma janela de uso reiniciar ou chegar a um limite; instalado só para o Claude Code. |
 | `statusline/` | Status line do Claude Code que salva o uso para o lembrete. |
 | `plugins/` | Plugins do OpenCode e do Amp, que chamam o mesmo script de hook. |
 | `install.sh`, `install.ps1` | Instaladores; cada ferramenta é um adaptador numa mesma tabela. Os `uninstall.*` chamam os instaladores no modo de desinstalação. |
