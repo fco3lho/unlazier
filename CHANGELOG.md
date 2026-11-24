@@ -2,6 +2,12 @@
 
 All notable changes to Unlazier (called Unlazier AI before version 2.1) are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [2.4.1] - 2026-11-24
+
+### Fixed
+
+- A subagent that Claude Code sends to the background on its own (without `run_in_background`) no longer gets a usage line at launch, which repeated the reading the assistant already had. The hook now also reads the launch status from the tool result.
+
 ## [2.4.0] - 2026-11-24
 
 ### Added
