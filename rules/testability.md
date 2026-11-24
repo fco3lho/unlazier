@@ -3,7 +3,7 @@
 - **Testable Code** — use dependency injection, pure functions, and minimal mocking.
 - **Meaningful Coverage** — test behavior, not implementation. Don't mock everything.
 - **Simple Tests** — one assertion per test, descriptive names, arrange-act-assert structure.
-- **Test-First for Bugs** — reproduce the bug with a failing test before fixing it (see Goal-Driven Execution in AGENTS.md).
+- **Test-First for Bugs** — reproduce the bug with a failing test before fixing it (see Goal-Driven Execution in AGENTS.md). When the project has no test suite, reproduce it with a throwaway check run before and after the fix; add a test file only when the project already has tests.
 - **No Fragile Tests** — avoid overspecification. Tests should not break on innocent refactoring.
 
 ---

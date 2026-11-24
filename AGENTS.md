@@ -35,7 +35,7 @@ When questioning the user, follow a structured approach:
 - No features beyond what was asked.
 - No abstractions for single-use code.
 - No flexibility or configurability that wasn't requested.
-- No error handling for impossible scenarios.
+- No error handling for impossible scenarios. Impossible means ruled out by the code's own guarantees; a value a caller or user can pass is possible and gets validated.
 - If you write 200 lines and it could be 50, rewrite it.
 
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
@@ -74,7 +74,7 @@ The test: Every changed line should trace directly to the user's request.
 
 Transform tasks into verifiable goals:
 - "Add validation" -> "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" -> "Write a test that reproduces it, then make it pass"
+- "Fix the bug" -> "Write a test that reproduces it, then make it pass" (in a project without tests, a throwaway check run before and after the fix)
 - "Refactor X" -> "Ensure tests pass before and after"
 
 For multi-step tasks, state a brief plan:
