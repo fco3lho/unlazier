@@ -2,6 +2,12 @@
 
 All notable changes to Unlazier (called Unlazier AI before version 2.1) are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [2.4.2] - 2026-11-24
+
+### Fixed
+
+- Reinstalling now updates the Claude Code status line that Unlazier installed earlier: it gets the current script and gains `refreshInterval: 60` if it has none. Before, any existing status line was kept as yours, so upgrades never delivered status line fixes (such as the 2.4.0 temporary file fix). A status line of your own is still left alone.
+
 ## [2.4.1] - 2026-11-24
 
 ### Fixed
