@@ -4,7 +4,7 @@
     1. Subagents for subtasks of the same main task.
     2. Different tasks of a single request (for example, the tasks of one issue).
     3. Two or more different requests, each with one or more main tasks.
-- **Read Usage First** — the injected Unlazier reminder carries a `Usage:` line with the 5-hour and weekly window percentages and their source. It arrives with each prompt; in Claude Code, also with each turn Claude Code starts on its own and after each subagent call. Check it before starting concurrent work and again after long-running steps. Report the reading and its source to the user when it changes your pace.
+- **Read Usage First** — the injected Unlazier reminder carries a `Usage:` line with the 5-hour and weekly window percentages and their source. It arrives with each prompt; in Claude Code and Codex CLI, also after each subagent call, and in Claude Code with each turn it starts on its own. Check it before starting concurrent work and again after long-running steps. Report the reading and its source to the user when it changes your pace.
 - **Follow the Usage Ladder** — scale concurrency to the 5-hour window:
 
     | 5-hour window | Behavior |
@@ -17,9 +17,11 @@
     When the weekly window reaches 99%, pause: finish the current step, report, and wait for the user.
 - **At the Limit** — the tool, not this ladder, decides what happens at the usage limit:
     - Claude Code: keep working and do not end the turn early to wait or report. When the limit stops the session, Claude Code applies the user's choice in `autoContinueAtUsageLimit` and `/rate-limit-options`: it waits and continues the task on its own, or leaves the next step to the user. Never start a waiter of your own, re-arm a wait the user cancelled, or change the setting. When Claude Code continues after the reset, resume the interrupted task without repeating completed work.
+    - Codex CLI: keep working and do not end the turn early to wait or report; the turn in progress can go on past the limit. Codex does not resume after the reset, so when it stops the turn, the next step is the user's.
     - Other tools: finish the current step, report, and wait for the user.
+- **Subagent Gate (Claude Code and Codex CLI)** — while the 5-hour window is at 85% or more, or the weekly window at 99% or more, a hook denies new subagent calls and says why. Do as the denial says, and never retry the call or work around it.
 - **Unknown Usage** — when the `Usage:` line is missing or reads `unknown`, run at most 2–3 tasks concurrently and ask the user before going beyond 5.
-- **Rate-Limit Signals** — on any rate-limit error or quota warning, never retry in a tight loop. In Claude Code, its own usage-limit messages take precedence and **At the Limit** applies. In other tools, finish what is running, start nothing new, and report.
+- **Rate-Limit Signals** — on any rate-limit error or quota warning, never retry in a tight loop. In Claude Code and Codex CLI, **At the Limit** applies, and Claude Code's own usage-limit messages take precedence. In other tools, finish what is running, start nothing new, and report.
 - **No Credential Access** — never read credential files or call undocumented endpoints to obtain usage data.
 - **No Subagents Available** — if the harness has no subagents, apply the same ladder to concurrent tool calls or background tasks.
 

@@ -152,7 +152,9 @@ Assinaturas como as do Claude e do ChatGPT limitam quanto você pode usar numa j
 
 Quando a janela **semanal** chega a 99%, o assistente termina o passo atual, avisa você e espera.
 
-No **limite de uso**, quem decide é a ferramenta. O Claude Code v2.1.234 ou mais recente pode [esperar na sessão aberta e continuar a tarefa](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset) após o reinício de um limite da assinatura claude.ai. Isso vem ligado por padrão, e você controla com `autoContinueAtUsageLimit` nas configurações de usuário, no `/config` ou no `/rate-limit-options` (onde também pode iniciar ou cancelar uma espera). Por isso, no Claude Code o assistente continua trabalhando até o limite em vez de parar antes, e o Claude Code então espera e continua, ou deixa o próximo passo com você, conforme a sua escolha. O Unlazier não altera essa configuração nem inicia uma espera própria. As outras ferramentas não oferecem essa espera, então nelas o assistente termina o passo atual, avisa você e espera.
+No **limite de uso**, quem decide é a ferramenta. O Claude Code v2.1.234 ou mais recente pode [esperar na sessão aberta e continuar a tarefa](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset) após o reinício de um limite da assinatura claude.ai. Isso vem ligado por padrão, e você controla com `autoContinueAtUsageLimit` nas configurações de usuário, no `/config` ou no `/rate-limit-options` (onde também pode iniciar ou cancelar uma espera). Por isso, no Claude Code o assistente continua trabalhando até o limite em vez de parar antes, e o Claude Code então espera e continua, ou deixa o próximo passo com você, conforme a sua escolha. O Unlazier não altera essa configuração nem inicia uma espera própria; o instalador só avisa quando ela está desligada. O Codex CLI não tem essa espera, mas [deixa o turno em andamento seguir além do limite](https://learn.chatgpt.com/docs/pricing), então nele o assistente também continua trabalhando; depois o Codex para, e você continua após o reinício. As demais ferramentas não oferecem nenhuma das duas coisas, então nelas o assistente termina o passo atual, avisa você e espera.
+
+No **Claude Code** e no **Codex CLI**, parte da escada é imposta, não só pedida: enquanto a janela de 5 horas estiver em 85% ou mais, ou a semanal em 99% ou mais, um hook bloqueia todo novo agente auxiliar e diz ao assistente para continuar sozinho (ou pausar, no caso da janela semanal). Abaixo desses níveis o hook fica em silêncio e não custa nada.
 
 Quando paraleliza, ele prefere, nesta ordem: agentes auxiliares para partes da mesma tarefa, depois tarefas diferentes do mesmo pedido, depois pedidos diferentes.
 
@@ -172,7 +174,7 @@ Quando paraleliza, ele prefere, nesta ordem: agentes auxiliares para partes da m
     ```
 
     `captured_at` é o horário atual em segundos. Os dados de uso só existem nos planos de assinatura do Claude, não com chave de API. A linha de uso também chega após cada chamada de subagente, então o assistente vê o uso subir durante um turno longo.
-- **Codex CLI** grava o uso no próprio log de sessão, que o lembrete lê. Não é preciso configurar nada.
+- **Codex CLI** grava o uso no próprio log de sessão, que o lembrete lê. Não é preciso configurar nada. A linha de uso também chega após cada chamada de subagente.
 - **As outras ferramentas** não expõem o uso, então o lembrete diz `Usage: unknown`. Nesse caso, o assistente roda no máximo 2 a 3 tarefas ao mesmo tempo e pergunta a você antes de rodar mais de 5.
 
 Uma leitura com mais de 15 minutos conta como desconhecida.
@@ -297,7 +299,7 @@ Organização do repositório:
 |---------|--------|
 | `AGENTS.md`, `rules/` | As regras (camada 1). `CLAUDE.md` é um link para `AGENTS.md`. |
 | `reminder.md` | O lembrete curto (camada 2). |
-| `hooks/inject.sh`, `hooks/inject.ps1` | Imprime o lembrete e a linha de uso (camadas 2 e 3) no formato que cada ferramenta espera. |
+| `hooks/inject.sh`, `hooks/inject.ps1` | Imprime o lembrete e a linha de uso (camadas 2 e 3) no formato que cada ferramenta espera; no Claude Code e no Codex CLI, também bloqueia novos agentes auxiliares quando o uso está alto. |
 | `hooks/alert.sh`, `hooks/alert.ps1` | Toca os bipes de alerta (camada 4). |
 | `statusline/` | Status line do Claude Code que salva o uso para o lembrete. |
 | `plugins/` | Plugins do OpenCode e do Amp, que chamam o mesmo script de hook. |

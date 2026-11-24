@@ -150,7 +150,9 @@ Subscriptions such as Claude and ChatGPT limit how much you can use in a 5-hour 
 
 When the **weekly** window reaches 99%, the assistant finishes the current step, tells you, and waits.
 
-At the **usage limit**, the tool decides what happens. Claude Code v2.1.234 or later can [wait in the open session and continue the task](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset) after a claude.ai subscription limit resets. It is on by default, and you control it with `autoContinueAtUsageLimit` in user settings, `/config`, or `/rate-limit-options` (where you can also start or cancel a wait). So in Claude Code the assistant keeps working until the limit instead of stopping early, and Claude Code then waits and continues, or leaves the next step to you, as you chose. Unlazier does not change this setting or run its own waiter. Other tools offer no such wait, so there the assistant finishes the current step, tells you, and waits.
+At the **usage limit**, the tool decides what happens. Claude Code v2.1.234 or later can [wait in the open session and continue the task](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset) after a claude.ai subscription limit resets. It is on by default, and you control it with `autoContinueAtUsageLimit` in user settings, `/config`, or `/rate-limit-options` (where you can also start or cancel a wait). So in Claude Code the assistant keeps working until the limit instead of stopping early, and Claude Code then waits and continues, or leaves the next step to you, as you chose. Unlazier does not change this setting or run its own waiter; the installer only tells you when it is off. Codex CLI has no such wait, but it [lets the turn in progress go on past the limit](https://learn.chatgpt.com/docs/pricing), so there the assistant also keeps working; Codex then stops, and you continue after the reset. The other tools offer neither, so there the assistant finishes the current step, tells you, and waits.
+
+In **Claude Code** and **Codex CLI**, part of the ladder is enforced, not only asked for: while the 5-hour window is at 85% or more, or the weekly window at 99% or more, a hook blocks every new helper agent and tells the assistant to continue on its own (or to pause, for the weekly window). Below those levels the hook stays silent and costs nothing.
 
 When it parallelizes, it prefers, in this order: helper agents for parts of the same task, then different tasks of the same request, then different requests.
 
@@ -170,7 +172,7 @@ When it parallelizes, it prefers, in this order: helper agents for parts of the 
     ```
 
     `captured_at` is the current time in seconds. Usage data is available only on Claude subscription plans, not with an API key. The usage line also follows each subagent call, so the assistant sees usage climb during a long turn.
-- **Codex CLI** writes usage into its own session log, which the reminder reads. Nothing to set up.
+- **Codex CLI** writes usage into its own session log, which the reminder reads. Nothing to set up. The usage line also follows each subagent call.
 - **Other tools** do not expose usage, so the reminder says `Usage: unknown`. The assistant then runs at most 2 to 3 tasks at a time and asks you before running more than 5.
 
 A reading older than 15 minutes counts as unknown.
@@ -295,7 +297,7 @@ Repository layout:
 |------|---------|
 | `AGENTS.md`, `rules/` | The rules (layer 1). `CLAUDE.md` links to `AGENTS.md`. |
 | `reminder.md` | The short reminder (layer 2). |
-| `hooks/inject.sh`, `hooks/inject.ps1` | Prints the reminder and the usage line (layers 2 and 3) in the format each tool expects. |
+| `hooks/inject.sh`, `hooks/inject.ps1` | Prints the reminder and the usage line (layers 2 and 3) in the format each tool expects; in Claude Code and Codex CLI, also blocks new helper agents when usage is high. |
 | `hooks/alert.sh`, `hooks/alert.ps1` | Plays the alert beeps (layer 4). |
 | `statusline/` | Claude Code status line that saves usage for the reminder. |
 | `plugins/` | OpenCode and Amp plugins, which call the same hook script. |
