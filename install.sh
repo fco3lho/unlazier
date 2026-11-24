@@ -104,6 +104,18 @@ harness_home() {
     esac
 }
 
+# Hook commands carry the harness home inside double quotes, where these characters would run
+# code or end the quoting each time the hook runs.
+assert_safe_home() {
+    local home
+    home="$(harness_home "$1")"
+    case "$home" in
+        *'$'* | *'`'* | *'"'* | *\\*)
+            die "$(harness_label "$1"): the folder $home contains \$, \`, \", or \\, which a hook command cannot carry safely; nothing was installed. Use a folder without these characters."
+            ;;
+    esac
+}
+
 harness_binaries() {
     case "$1" in
         kiro) echo "kiro-cli kiro" ;;
@@ -931,6 +943,9 @@ main() {
             uninstall_harness "$harness"
         done
     else
+        for harness in $harnesses; do
+            assert_safe_home "$harness"
+        done
         prepare_source
         [ "$HAS_JQ" = true ] || print_jq_help
         for harness in $harnesses; do

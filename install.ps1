@@ -154,6 +154,16 @@ param(
         }
     }
 
+    # Hook commands carry the harness home inside double quotes, where these characters would run
+    # code or end the quoting each time the hook runs, in cmd.exe, PowerShell, or Git Bash.
+    function Assert-SafeHarnessHome {
+        param([string]$Name)
+        $harnessHome = Get-HarnessHome $Name
+        if ($harnessHome.IndexOfAny([char[]]@('"', '$', '`', '%')) -ge 0) {
+            throw "$(Get-HarnessLabel $Name): the folder $harnessHome contains a double quote, a dollar sign, a backtick, or a percent sign, which a hook command cannot carry safely; nothing was installed. Use a folder without these characters."
+        }
+    }
+
     function Get-HarnessBinaries {
         param([string]$Name)
         switch ($Name) {
@@ -1254,6 +1264,9 @@ param(
             }
         } else {
             try {
+                foreach ($name in $harnesses) {
+                    Assert-SafeHarnessHome $name
+                }
                 Initialize-Source
                 $leftovers = New-Object System.Collections.Generic.List[string]
                 foreach ($name in $harnesses) {

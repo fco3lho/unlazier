@@ -463,6 +463,19 @@ test_upgrade_from_v2_0_layout() {
         '[.hooks.UserPromptSubmit[].hooks[].command] == ["bash \"'"$home"'/.claude/unlazier/inject.sh\" claude prompt"]'
 }
 
+test_unsafe_home_refused() {
+    local unsafe_home output status
+    echo "a home path the hook command cannot carry is refused"
+    unsafe_home="$(new_home)/user\$(touch ran)"
+    mkdir -p "$unsafe_home"
+    output="$(run_installer "$unsafe_home" --harness claude 2>&1)"
+    status=$?
+
+    check "install fails" test "$status" -ne 0
+    check "the error names the path" test -n "$(printf '%s' "$output" | grep '^Error:' | grep -F "$unsafe_home/.claude")"
+    check "nothing written" file_absent "$unsafe_home/.claude"
+}
+
 test_invalid_json_left_untouched() {
     local home before
     echo "an unreadable config file is never rewritten"
@@ -753,6 +766,7 @@ main() {
     test_v1_leftovers_kept_without_confirmation
     test_own_global_rules_file_kept
     test_upgrade_from_v2_0_layout
+    test_unsafe_home_refused
     test_invalid_json_left_untouched
     test_missing_jq_installs_rules_only
     test_inject_usage_lines

@@ -684,6 +684,21 @@ function Test-UpgradeFromV20Layout {
     }
 }
 
+function Test-UnsafeHomeRefused {
+    Write-Host 'a home path the hook command cannot carry is refused'
+    $unsafeHome = Join-TestPath (New-TestHome) 'user$(ran)'
+    [void][System.IO.Directory]::CreateDirectory($unsafeHome)
+    $result = Invoke-Installer $unsafeHome @('-Harness', 'claude')
+
+    Assert-That 'install fails' { $result.ExitCode -ne 0 }
+    # The error view may wrap long lines, so the output is compared without white space.
+    Assert-That 'the error names the path' {
+        $output = ($result.Lines -join '') -replace '\s', ''
+        $output.Contains('cannotcarrysafely') -and $output.Contains(((Join-TestPath $unsafeHome '.claude') -replace '\s', ''))
+    }
+    Assert-That 'nothing written' { -not (Test-Path -LiteralPath (Join-TestPath $unsafeHome '.claude')) }
+}
+
 function Test-InvalidJsonLeftUntouched {
     Write-Host 'an unreadable config file is never rewritten'
     $testHome = New-TestHome
@@ -1052,6 +1067,7 @@ try {
     Test-V1LeftoversKeptWithoutConfirmation
     Test-OwnGlobalRulesFileKept
     Test-UpgradeFromV20Layout
+    Test-UnsafeHomeRefused
     Test-InvalidJsonLeftUntouched
     Test-InjectUsageLines
     Test-InjectOutputFormats
