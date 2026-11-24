@@ -570,7 +570,10 @@ function Initialize-V1Installation {
     $claudeHome = Join-TestPath $TestHome '.claude'
     [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::Combine($claudeHome, 'rules'))
     [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::Combine($claudeHome, 'skills'))
-    Copy-Item -LiteralPath ([System.IO.Path]::Combine($v1, 'AGENTS.md')) -Destination ([System.IO.Path]::Combine($claudeHome, 'CLAUDE.md'))
+    # Version 1 (install.sh) wrote absolute rules/ paths into the Claude Code copy.
+    $v1Rules = [System.IO.File]::ReadAllText([System.IO.Path]::Combine($v1, 'AGENTS.md'))
+    Write-TestFile ([System.IO.Path]::Combine($claudeHome, 'CLAUDE.md')) (
+        $v1Rules.Replace('rules/', (($claudeHome -replace '\\', '/') + '/rules/')))
     Get-ChildItem -LiteralPath ([System.IO.Path]::Combine($v1, 'rules')) -File |
         Copy-Item -Destination ([System.IO.Path]::Combine($claudeHome, 'rules'))
     Get-ChildItem -LiteralPath ([System.IO.Path]::Combine($v1, 'skills')) -Directory |
@@ -581,6 +584,7 @@ function Initialize-V1Installation {
 
     $openCodeHome = Join-TestPath $TestHome '.config/opencode'
     [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::Combine($openCodeHome, 'skills'))
+    Copy-Item -LiteralPath ([System.IO.Path]::Combine($v1, 'AGENTS.md')) -Destination ([System.IO.Path]::Combine($openCodeHome, 'AGENTS.md'))
     Copy-Item -LiteralPath ([System.IO.Path]::Combine($v1, 'opencode.json')) -Destination ([System.IO.Path]::Combine($openCodeHome, 'opencode.json'))
     Copy-Item -LiteralPath ([System.IO.Path]::Combine($v1, 'skills', 'bugfix')) -Destination ([System.IO.Path]::Combine($openCodeHome, 'skills')) -Recurse
 }
@@ -597,7 +601,24 @@ function Test-V1LeftoversRemovedWithYes {
     Assert-That 'user skill kept' { Test-Path -LiteralPath (Join-TestPath $testHome '.claude/skills/my-skill/SKILL.md') -PathType Leaf }
     Assert-That 'v1 OpenCode config removed' { -not (Test-Path -LiteralPath (Join-TestPath $testHome '.config/opencode/opencode.json')) }
     Assert-That 'v1 CLAUDE.md removed' { -not (Test-Path -LiteralPath (Join-TestPath $testHome '.claude/CLAUDE.md')) }
+    Assert-That 'v1 OpenCode AGENTS.md replaced by the block' {
+        [System.IO.File]::ReadAllText((Join-TestPath $testHome '.config/opencode/AGENTS.md')).StartsWith("<!-- unlazier:start -->`n")
+    }
     Assert-That 'v2 rule files installed' { Test-HasAllRuleFiles (Join-TestPath $testHome '.claude/rules') }
+}
+
+function Test-OwnGlobalRulesFileKept {
+    Write-Host "a user's own rules file with the version 1 heading is kept"
+    $testHome = New-TestHome
+    $ownRules = "# Global Agent Rules`n`nMy own rules.`n"
+    Write-TestFile (Join-TestPath $testHome '.claude/CLAUDE.md') $ownRules
+    Write-TestFile (Join-TestPath $testHome '.config/opencode/AGENTS.md') $ownRules
+    [void](Invoke-Installer $testHome @('-Harness', 'claude,opencode', '-Yes'))
+
+    Assert-That 'own CLAUDE.md kept' { Test-ContainsLine (Join-TestPath $testHome '.claude/CLAUDE.md') 'My own rules.' }
+    Assert-That 'own OpenCode AGENTS.md kept' {
+        Test-ContainsLine (Join-TestPath $testHome '.config/opencode/AGENTS.md') 'My own rules.'
+    }
 }
 
 function Test-V1LeftoversKeptWithoutConfirmation {
@@ -1029,6 +1050,7 @@ try {
     Test-UnclosedMarkerKeepsText
     Test-V1LeftoversRemovedWithYes
     Test-V1LeftoversKeptWithoutConfirmation
+    Test-OwnGlobalRulesFileKept
     Test-UpgradeFromV20Layout
     Test-InvalidJsonLeftUntouched
     Test-InjectUsageLines

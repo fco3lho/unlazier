@@ -369,6 +369,7 @@ seed_v1_installation() {
     mkdir -p "$home/.claude/skills/my-skill"
     printf 'mine\n' > "$home/.claude/skills/my-skill/SKILL.md"
     mkdir -p "$home/.config/opencode"
+    cp "$FIXTURES_DIR/v1/AGENTS.md" "$home/.config/opencode/AGENTS.md"
     cp "$FIXTURES_DIR/v1/opencode.json" "$home/.config/opencode/opencode.json"
     mkdir -p "$home/.config/opencode/skills/bugfix"
     cp "$FIXTURES_DIR/v1/skills/bugfix/SKILL.md" "$home/.config/opencode/skills/bugfix/"
@@ -387,7 +388,25 @@ test_v1_leftovers_removed_with_yes() {
     check "user skill kept" test -f "$home/.claude/skills/my-skill/SKILL.md"
     check "v1 OpenCode config removed" file_absent "$home/.config/opencode/opencode.json"
     check "v1 CLAUDE.md removed" file_absent "$home/.claude/CLAUDE.md"
+    check "v1 OpenCode AGENTS.md replaced by the block" \
+        test "$(head -n 1 "$home/.config/opencode/AGENTS.md")" = "<!-- unlazier:start -->"
     check "v2 rule files installed" has_all_rule_files "$home/.claude/rules"
+}
+
+test_own_global_rules_file_kept() {
+    local home own_rules
+    echo "a user's own rules file with the version 1 heading is kept"
+    home="$(new_home)"
+    own_rules='# Global Agent Rules\n\nMy own rules.\n'
+    mkdir -p "$home/.claude" "$home/.config/opencode"
+    # shellcheck disable=SC2059  # the text is a printf format on purpose, for its newlines
+    printf "$own_rules" > "$home/.claude/CLAUDE.md"
+    # shellcheck disable=SC2059
+    printf "$own_rules" > "$home/.config/opencode/AGENTS.md"
+    run_installer "$home" --harness claude,opencode --yes >/dev/null 2>&1
+
+    check "own CLAUDE.md kept" contains_line "$home/.claude/CLAUDE.md" "My own rules."
+    check "own OpenCode AGENTS.md kept" contains_line "$home/.config/opencode/AGENTS.md" "My own rules."
 }
 
 test_v1_leftovers_kept_without_confirmation() {
@@ -732,6 +751,7 @@ main() {
     test_unclosed_marker_keeps_text
     test_v1_leftovers_removed_with_yes
     test_v1_leftovers_kept_without_confirmation
+    test_own_global_rules_file_kept
     test_upgrade_from_v2_0_layout
     test_invalid_json_left_untouched
     test_missing_jq_installs_rules_only

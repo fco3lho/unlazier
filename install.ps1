@@ -71,7 +71,7 @@ param(
         'refactoring' = '0bf86046b84bae55f534bbf283153ece35b291f8c7bd55041171f5261f9e9315'
     }
     $V1OpenCodeConfig = '{"$schema":"https://opencode.ai/config.json","instructions":["~/.config/opencode/AGENTS.md","~/.config/opencode/rules/*.md"],"skills":{"paths":["~/.config/opencode/skills"]}}'
-    $V1GlobalHeading = '# Global Agent Rules'
+    $V1GlobalHash = 'fb4d566e0b83a9e00831f00f1339296690524b729bf38fb1d522576a3bd9222a'
 
     # Hook entries and the status line are ours when they run one of the payload scripts, under
     # the current folder name or the 2.0 one; a user's own path that only mentions unlazier (a
@@ -700,16 +700,6 @@ param(
         return $builder.ToString()
     }
 
-    function Test-HasMarker {
-        param([string]$Text, [string]$Start = $MarkerStart)
-        foreach ($line in ($Text -split "`n")) {
-            if ($line.TrimEnd("`r") -eq $Start) {
-                return $true
-            }
-        }
-        return $false
-    }
-
     # A block runs from a start marker line to the next end marker line. A start marker followed
     # by another start marker, or by none, opens no block: it stays as text, with the user's lines
     # after it, which a broken block would otherwise swallow up to the end of the file.
@@ -942,21 +932,36 @@ param(
     # Version 1 leftovers (Claude Code and OpenCode only).
     # -----------------------------------------------------------------------
 
-    function Get-NormalizedHash {
-        param([string]$Path)
-        $text = (Read-TextFile $Path).Text -replace "`r`n", "`n"
+    function Get-TextHash {
+        param([string]$Text)
         $algorithm = [System.Security.Cryptography.SHA256]::Create()
         try {
-            $hash = $algorithm.ComputeHash($Utf8NoBom.GetBytes($text))
+            $hash = $algorithm.ComputeHash($Utf8NoBom.GetBytes($Text))
         } finally {
             $algorithm.Dispose()
         }
         return (($hash | ForEach-Object { $_.ToString('x2') }) -join '')
     }
 
+    function Get-NormalizedText {
+        param([string]$Path)
+        return (Read-TextFile $Path).Text -replace "`r`n", "`n"
+    }
+
     function Test-HashMatch {
         param([string]$Path, [string]$Expected)
-        return (Test-Path -LiteralPath $Path -PathType Leaf) -and ((Get-NormalizedHash $Path) -eq $Expected)
+        return (Test-Path -LiteralPath $Path -PathType Leaf) -and ((Get-TextHash (Get-NormalizedText $Path)) -eq $Expected)
+    }
+
+    # Version 1 made the rules/ paths in the Claude Code copy absolute; they are made relative
+    # again so the copy matches the hash of the shipped file.
+    function Test-V1GlobalFile {
+        param([string]$Path)
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            return $false
+        }
+        $text = (Get-NormalizedText $Path) -replace '`[^`]*/\.claude/rules/', '`rules/'
+        return (Get-TextHash $text) -eq $V1GlobalHash
     }
 
     function Test-V1OpenCodeConfig {
@@ -986,12 +991,8 @@ param(
         if ($Name -eq 'claude') {
             $globalFile = [System.IO.Path]::Combine($harnessHome, 'CLAUDE.md')
         }
-        if (Test-Path -LiteralPath $globalFile -PathType Leaf) {
-            $text = (Read-TextFile $globalFile).Text
-            $firstLine = ($text -split "`n")[0].TrimEnd("`r")
-            if ($firstLine -eq $V1GlobalHeading -and -not (Test-HasMarker $text)) {
-                $leftovers.Add($globalFile)
-            }
+        if (Test-V1GlobalFile $globalFile) {
+            $leftovers.Add($globalFile)
         }
 
         foreach ($ruleName in $V1RuleHashes.Keys) {

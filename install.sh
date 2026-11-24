@@ -48,7 +48,7 @@ V1_SKILL_CHECKSUMS="bugfix 1429495546 1065
 code-review 4077940051 2292
 refactoring 3722468995 1349"
 V1_OPENCODE_CONFIG='{"$schema":"https://opencode.ai/config.json","instructions":["~/.config/opencode/AGENTS.md","~/.config/opencode/rules/*.md"],"skills":{"paths":["~/.config/opencode/skills"]}}'
-V1_GLOBAL_HEADING="# Global Agent Rules"
+V1_GLOBAL_CHECKSUM="2969683781 6213"
 
 # Hook entries, the status line, and Cline hook scripts are ours when they run one of the payload
 # scripts, under the current folder name or the 2.0 one; a user's own path that only mentions
@@ -651,8 +651,10 @@ find_v1_leftovers() {
 
     global_file="$home/AGENTS.md"
     [ "$harness" = "claude" ] && global_file="$home/CLAUDE.md"
-    if [ -f "$global_file" ] && [ "$(head -n 1 "$global_file")" = "$V1_GLOBAL_HEADING" ] \
-        && ! grep -qxF "$MARKER_START" "$global_file"; then
+    # Version 1 made the rules/ paths in the Claude Code copy absolute; they are made relative
+    # again so the copy matches the checksum of the shipped file.
+    if [ -f "$global_file" ] && [ "$(sed 's|`[^`]*/\.claude/rules/|`rules/|g' "$global_file" \
+        | cksum | awk '{print $1" "$2}')" = "$V1_GLOBAL_CHECKSUM" ]; then
         echo "$global_file"
     fi
 
