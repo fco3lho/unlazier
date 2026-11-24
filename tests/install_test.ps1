@@ -270,11 +270,24 @@ function Test-InstallAddsAllLayers {
         @($claudeSettings.hooks.PostToolUse | Where-Object { $_.matcher -eq 'Agent' } | ForEach-Object { $_.hooks } |
             Where-Object { $_.command.Contains('inject.ps1" claude subagent') }).Count -eq 1
     }
+    Assert-That 'Claude subagent gate hook' {
+        @($claudeSettings.hooks.PreToolUse | Where-Object { $_.matcher -eq 'Agent' } | ForEach-Object { $_.hooks } |
+            Where-Object { $_.command.Contains('inject.ps1" claude dispatch') }).Count -eq 1
+    }
     Assert-That 'Claude status line installed' { $claudeSettings.statusLine.command.Contains('claude-statusline.ps1') }
     Assert-That 'Claude status line refreshes every minute' { $claudeSettings.statusLine.refreshInterval -eq 60 }
     Assert-That 'Codex hooks registered' {
         @(Get-HookCommands (Read-TestJson (Join-TestPath $testHome '.codex/hooks.json')) 'UserPromptSubmit' |
             Where-Object { $_.Contains('inject.ps1" codex prompt') }).Count -eq 1
+    }
+    $codexHooks = (Read-TestJson (Join-TestPath $testHome '.codex/hooks.json')).hooks
+    Assert-That 'Codex subagent usage hook' {
+        @($codexHooks.PostToolUse | Where-Object { $_.matcher -eq 'spawn_agent' } | ForEach-Object { $_.hooks } |
+            Where-Object { $_.command.Contains('inject.ps1" codex subagent') }).Count -eq 1
+    }
+    Assert-That 'Codex subagent gate hook' {
+        @($codexHooks.PreToolUse | Where-Object { $_.matcher -eq 'spawn_agent' } | ForEach-Object { $_.hooks } |
+            Where-Object { $_.command.Contains('inject.ps1" codex dispatch') }).Count -eq 1
     }
     Assert-That 'Gemini hook registered' {
         @(Get-HookCommands (Read-TestJson (Join-TestPath $testHome '.gemini/settings.json')) 'BeforeAgent' |
@@ -343,9 +356,25 @@ function Test-ReinstallIsIdempotent {
         @(Get-HookCommands (Read-TestJson (Join-TestPath $testHome '.claude/settings.json')) 'PostToolUse' |
             Where-Object { $_.Contains('unlazier') }).Count -eq 1
     }
+    Assert-That 'one Claude subagent gate hook' {
+        @((Read-TestJson (Join-TestPath $testHome '.claude/settings.json')).hooks.PreToolUse |
+            Where-Object { $_.matcher -eq 'Agent' } | ForEach-Object { $_.hooks } |
+            Where-Object { $_.command.Contains('unlazier') }).Count -eq 1
+    }
+    Assert-That 'one Claude question alert next to the gate' {
+        Test-HasAlertHook (Join-TestPath $testHome '.claude/settings.json') 'PreToolUse' 'AskUserQuestion'
+    }
     Assert-That 'one Codex prompt hook' {
         @(Get-HookCommands (Read-TestJson (Join-TestPath $testHome '.codex/hooks.json')) 'UserPromptSubmit' |
             Where-Object { $_.Contains('unlazier') }).Count -eq 1
+    }
+    Assert-That 'one Codex subagent gate hook' {
+        @((Read-TestJson (Join-TestPath $testHome '.codex/hooks.json')).hooks.PreToolUse |
+            Where-Object { $_.matcher -eq 'spawn_agent' } | ForEach-Object { $_.hooks } |
+            Where-Object { $_.command.Contains('unlazier') }).Count -eq 1
+    }
+    Assert-That 'one Codex question alert next to the gate' {
+        Test-HasAlertHook (Join-TestPath $testHome '.codex/hooks.json') 'PreToolUse' '^request_user_input$'
     }
     Assert-That 'one Claude end-of-turn alert' { Test-HasAlertHook (Join-TestPath $testHome '.claude/settings.json') 'Stop' }
     Assert-That 'one Codex end-of-turn alert' { Test-HasAlertHook (Join-TestPath $testHome '.codex/hooks.json') 'Stop' }
@@ -532,6 +561,11 @@ function Test-InjectUsageLines {
     Assert-That 'Codex usage line' {
         (Get-LastLine (Invoke-Inject $testHome '.codex' 'codex' 'prompt')) -eq 'Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old)'
     }
+    Assert-That 'Codex subagent context is only the usage line' {
+        $output = (ConvertFrom-OutputJson (Invoke-Inject $testHome '.codex' 'codex' 'subagent')).hookSpecificOutput
+        $output.hookEventName -eq 'PostToolUse' -and
+            $output.additionalContext -eq 'Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old)'
+    }
     Assert-That 'Kiro usage unknown' {
         (Get-LastLine (Invoke-Inject $testHome '.kiro' 'kiro' 'prompt')) -eq 'Usage: unknown (this tool does not expose usage windows)'
     }
@@ -666,6 +700,88 @@ function Test-InjectProjectRules {
     }
 }
 
+# Writes a fresh Claude usage reading, or one captured the given number of seconds ago.
+function Write-ClaudeUsage {
+    param([string]$TestHome, [double]$FiveHour, [double]$Weekly, [int]$AgeSeconds = 0)
+    $now = Get-UnixNow
+    Write-TestJson (Join-TestPath $TestHome '.claude/state/rate_limits.json') ([pscustomobject]@{
+        captured_at = $now - $AgeSeconds
+        five_hour = [pscustomobject]@{ used_percentage = $FiveHour; resets_at = $now + 3600 }
+        seven_day = [pscustomobject]@{ used_percentage = $Weekly; resets_at = $now + 86400 }
+    })
+}
+
+function Test-InjectDispatchGate {
+    Write-Host 'the subagent gate blocks only where the usage ladder forbids subagents'
+    $testHome = New-TestHome
+    $now = Get-UnixNow
+    [void](Invoke-Installer $testHome @('-Harness', 'claude,codex,gemini'))
+
+    Write-ClaudeUsage $testHome 84.4 40
+    Assert-That 'below 85% the gate allows silently' {
+        $result = Invoke-Inject $testHome '.claude' 'claude' 'dispatch'
+        $result.ExitCode -eq 0 -and @($result.Lines | Where-Object { $_ -ne '' }).Count -eq 0
+    }
+    Write-ClaudeUsage $testHome 84.6 40
+    Assert-That '85% after rounding is denied' {
+        $output = (ConvertFrom-OutputJson (Invoke-Inject $testHome '.claude' 'claude' 'dispatch')).hookSpecificOutput
+        $output.hookEventName -eq 'PreToolUse' -and $output.permissionDecision -eq 'deny' -and
+            $output.permissionDecisionReason.StartsWith('Usage: 5h 85%') -and
+            $output.permissionDecisionReason.Contains('continue the work sequentially')
+    }
+    Write-ClaudeUsage $testHome 10 99
+    Assert-That 'weekly 99% is denied with a pause' {
+        (ConvertFrom-OutputJson (Invoke-Inject $testHome '.claude' 'claude' 'dispatch')).hookSpecificOutput.permissionDecisionReason.Contains('weekly window is at 99% or more')
+    }
+    Write-ClaudeUsage $testHome 96 40 3600
+    Assert-That 'a stale reading never blocks' {
+        @((Invoke-Inject $testHome '.claude' 'claude' 'dispatch').Lines | Where-Object { $_ -ne '' }).Count -eq 0
+    }
+    Remove-Item -LiteralPath (Join-TestPath $testHome '.claude/state/rate_limits.json') -Force
+    Assert-That 'a missing reading never blocks' {
+        @((Invoke-Inject $testHome '.claude' 'claude' 'dispatch').Lines | Where-Object { $_ -ne '' }).Count -eq 0
+    }
+
+    Write-CodexRollouts $testHome $now
+    Assert-That 'Codex at 43% allows silently' {
+        @((Invoke-Inject $testHome '.codex' 'codex' 'dispatch').Lines | Where-Object { $_ -ne '' }).Count -eq 0
+    }
+    $timestamp = [System.DateTimeOffset]::FromUnixTimeSeconds($now).UtcDateTime.ToString(
+        "yyyy-MM-dd'T'HH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
+    $highUsage = [pscustomobject]@{
+        timestamp = $timestamp; type = 'event_msg'
+        payload = [pscustomobject]@{ type = 'token_count'; rate_limits = [pscustomobject]@{
+            primary = [pscustomobject]@{ used_percent = 90; window_minutes = 300; resets_at = $now + 999 } } }
+    }
+    Write-TestFile (Join-TestPath $testHome '.codex/sessions/2026/11/15/rollout-2026-11-15T10-00-00-c.jsonl') (
+        (ConvertTo-Json -InputObject $highUsage -Depth 10 -Compress) + "`n")
+    Assert-That 'Codex at 90% is denied' {
+        $output = (ConvertFrom-OutputJson (Invoke-Inject $testHome '.codex' 'codex' 'dispatch')).hookSpecificOutput
+        $output.permissionDecision -eq 'deny' -and $output.permissionDecisionReason.StartsWith('Usage: 5h 90%') -and
+            $output.permissionDecisionReason.Contains('source: Codex session log')
+    }
+    Assert-That 'the gate is only for Claude and Codex' { (Invoke-Inject $testHome '.gemini' 'gemini' 'dispatch').ExitCode -eq 2 }
+}
+
+function Test-AutoContinueNotice {
+    Write-Host 'the installer reports auto-continue turned off without changing it'
+    $testHome = New-TestHome
+    $settingsPath = Join-TestPath $testHome '.claude/settings.json'
+    Write-TestJson $settingsPath ([pscustomobject]@{ autoContinueAtUsageLimit = $false })
+    $result = Invoke-Installer $testHome @('-Harness', 'claude')
+
+    Assert-That 'the notice names the setting' {
+        @($result.Lines | Where-Object { $_ -like '*autoContinueAtUsageLimit is off*' }).Count -eq 1
+    }
+    Assert-That 'the setting stays off' { (Read-TestJson $settingsPath).autoContinueAtUsageLimit -eq $false }
+    $settings = Read-TestJson $settingsPath
+    $settings.autoContinueAtUsageLimit = $true
+    Write-TestJson $settingsPath $settings
+    Assert-That 'no notice when it is on' {
+        @((Invoke-Installer $testHome @('-Harness', 'claude')).Lines | Where-Object { $_ -like '*autoContinueAtUsageLimit is off*' }).Count -eq 0
+    }
+}
+
 function Test-UpgradeRemovesObsoletePayload {
     Write-Host 'install removes obsolete payload files'
     $testHome = New-TestHome
@@ -728,6 +844,8 @@ try {
     Test-InjectUsageLines
     Test-InjectOutputFormats
     Test-InjectProjectRules
+    Test-InjectDispatchGate
+    Test-AutoContinueNotice
     Test-UpgradeRemovesObsoletePayload
     Test-StatusLineSavesUsage
 } finally {

@@ -154,16 +154,19 @@ alert_command() {
 # Claude Code, Codex, Gemini CLI, and Devin share the same hook layout:
 # {"hooks": {"<Event>": [{"matcher": "...", "hooks": [{"type": "command", "command": "..."}]}]}}.
 # Entries whose command mentions unlazier are ours; everything else is left untouched.
+# add_hook replaces only our entry for the same matcher, because one event can carry several of
+# ours (Claude Code PreToolUse has both the question alert and the subagent gate).
 JQ_HOOK_HELPERS='
-def without_ours:
+def without_ours_where(targeted):
     if type == "array" then
-        map(if (.hooks | type) == "array"
+        map(if (targeted) and (.hooks | type) == "array"
             then .hooks |= map(select((.command // "") | tostring | contains("unlazier") | not))
             else . end)
         | map(select((.hooks | type) != "array" or (.hooks | length) > 0))
     else . end;
+def without_ours: without_ours_where(true);
 def add_hook($event; $matcher; $command):
-    .hooks[$event] = (((.hooks // {})[$event] // []) | without_ours)
+    .hooks[$event] = (((.hooks // {})[$event] // []) | without_ours_where((.matcher // "") == $matcher))
         + [(if $matcher == "" then {} else {matcher: $matcher} end)
            + {hooks: [{type: "command", command: $command}]}];
 def remove_ours:
@@ -217,17 +220,22 @@ register_hooks() {
     case "$harness" in
         claude)
             # The reminder reaches the model only with a prompt; the PostToolUse hook refreshes the
-            # usage line after each subagent, the long step of a turn.
+            # usage line after each subagent, the long step of a turn, and the PreToolUse hook
+            # blocks a new subagent while the usage ladder forbids one.
             update_json_file "$home/settings.json" \
                 'add_hook("UserPromptSubmit"; ""; $prompt) | add_hook("SessionStart"; "compact"; $compact)
-                 | add_hook("PostToolUse"; "Agent"; $subagent)' \
+                 | add_hook("PostToolUse"; "Agent"; $subagent) | add_hook("PreToolUse"; "Agent"; $dispatch)' \
                 --arg prompt "$(hook_command claude prompt)" --arg compact "$(hook_command claude compact)" \
-                --arg subagent "$(hook_command claude subagent)"
+                --arg subagent "$(hook_command claude subagent)" --arg dispatch "$(hook_command claude dispatch)"
             ;;
         codex)
+            # Same usage hooks as Claude Code. The matcher is unanchored so it also matches the
+            # namespaced spawn_agent of Codex's opt-in multi_agent_v2.
             update_json_file "$home/hooks.json" \
-                'add_hook("UserPromptSubmit"; ""; $prompt) | add_hook("SessionStart"; "compact"; $compact)' \
+                'add_hook("UserPromptSubmit"; ""; $prompt) | add_hook("SessionStart"; "compact"; $compact)
+                 | add_hook("PostToolUse"; "spawn_agent"; $subagent) | add_hook("PreToolUse"; "spawn_agent"; $dispatch)' \
                 --arg prompt "$(hook_command codex prompt)" --arg compact "$(hook_command codex compact)" \
+                --arg subagent "$(hook_command codex subagent)" --arg dispatch "$(hook_command codex dispatch)" \
                 && add_notice "Codex: open Codex and run /hooks once to trust the Unlazier hooks."
             ;;
         gemini)
@@ -779,6 +787,13 @@ harness_warnings() {
     local harness="$1" home
     home="$(harness_home "$harness")"
     case "$harness" in
+        claude)
+            # Read only to explain what happens at the usage limit; the user's choice is never
+            # changed. A settings file jq cannot read is reported when the hooks are registered.
+            [ "$HAS_JQ" = true ] && [ -f "$home/settings.json" ] \
+                && [ "$(jq '.autoContinueAtUsageLimit == false' "$home/settings.json" 2>/dev/null)" = "true" ] \
+                && add_notice "Claude Code: autoContinueAtUsageLimit is off, so after a usage limit the session waits for you instead of continuing the task on its own. Unlazier keeps your choice; turn it on in /config, or start a single wait from /rate-limit-options."
+            ;;
         codex)
             [ -f "$home/AGENTS.override.md" ] \
                 && add_notice "Codex: $home/AGENTS.override.md exists, and Codex ignores AGENTS.md while it does."

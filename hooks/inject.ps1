@@ -1,11 +1,14 @@
 # Unlazier context hook for Windows.
 #
-# Usage: inject.ps1 <harness> <prompt|compact|subagent>
+# Usage: inject.ps1 <harness> <prompt|compact|subagent|dispatch>
 #   prompt   prints the short reminder and the usage line; runs on every user prompt.
 #   compact  prints the core principles, the reminder, and the usage line; runs after
 #            context compaction, when the original instructions may have been summarized away.
-#   subagent prints only the usage line, as Claude Code PostToolUse context; runs after each
-#            subagent call, so a long turn sees usage change between prompts.
+#   subagent prints only the usage line, as Claude Code or Codex PostToolUse context; runs after
+#            each subagent call, so a long turn sees usage change between prompts.
+#   dispatch denies a Claude Code or Codex subagent call while the usage ladder forbids
+#            subagents (5-hour window at 85% or more, weekly at 99% or more) and prints nothing
+#            otherwise.
 #
 # Rules loaded at session start lose weight as the context window fills, so the harness
 # calls this hook to place a compact copy near the end of the context. Installed at
@@ -209,6 +212,22 @@ function Format-Percent {
     return ([long][System.Math]::Floor($Value + 0.5)).ToString([System.Globalization.CultureInfo]::InvariantCulture) + '%'
 }
 
+# The usage reading of the harness, or $null. A missing or corrupt usage file must not break the
+# hook: the reading becomes unknown, as in inject.sh, and the cause goes to stderr where the
+# harness logs it.
+function Read-Usage {
+    param([string]$Harness, [double]$Now)
+    try {
+        if ($Harness -eq 'claude') {
+            return Read-ClaudeUsage $Now
+        }
+        return Read-CodexUsage $Now
+    } catch {
+        [Console]::Error.WriteLine("inject.ps1: usage reading failed: $($_.Exception.Message)")
+        return $null
+    }
+}
+
 function Get-UsageLine {
     param([string]$Harness)
     $now = Get-UnixTimeNow
@@ -217,18 +236,7 @@ function Get-UsageLine {
         'codex' { $source = 'Codex session log' }
         default { return 'Usage: unknown (this tool does not expose usage windows)' }
     }
-    # A missing or corrupt usage file must not break the hook: the reading becomes unknown, as
-    # in inject.sh, and the cause goes to stderr where the harness logs it.
-    try {
-        if ($Harness -eq 'claude') {
-            $reading = Read-ClaudeUsage $now
-        } else {
-            $reading = Read-CodexUsage $now
-        }
-    } catch {
-        [Console]::Error.WriteLine("inject.ps1: usage reading failed: $($_.Exception.Message)")
-        $reading = $null
-    }
+    $reading = Read-Usage $Harness $now
     if ($null -eq $reading) {
         return 'Usage: unknown (no usage reading available)'
     }
@@ -237,6 +245,26 @@ function Get-UsageLine {
     }
     $ageMinutes = ([long][System.Math]::Floor(($now - $reading.CapturedAt) / 60)).ToString([System.Globalization.CultureInfo]::InvariantCulture)
     return "Usage: 5h $(Format-Percent $reading.FiveHour) | weekly $(Format-Percent $reading.Weekly) (source: $source, $ageMinutes min old)"
+}
+
+# Why the usage ladder forbids a new subagent, or '' when it allows one. Percentages are rounded
+# as in the usage line, so the gate agrees with what the model reads. Only a fresh reading can
+# deny: with unknown usage the ladder still allows 2-3 concurrent tasks.
+function Get-DispatchBlockReason {
+    param([string]$Harness)
+    $now = Get-UnixTimeNow
+    $reading = Read-Usage $Harness $now
+    if ($null -eq $reading -or $null -eq $reading.CapturedAt -or ($now - $reading.CapturedAt) -gt $MaxReadingAgeSeconds) {
+        return ''
+    }
+    $usage = Get-UsageLine $Harness
+    if ($null -ne $reading.Weekly -and [System.Math]::Floor($reading.Weekly + 0.5) -ge 99) {
+        return "$usage. The weekly window is at 99% or more: start no subagent; finish the current step, report, and wait for the user."
+    }
+    if ($null -ne $reading.FiveHour -and [System.Math]::Floor($reading.FiveHour + 0.5) -ge 85) {
+        return "$usage. The 5-hour window is at 85% or more: start no subagent; continue the work sequentially in this session."
+    }
+    return ''
 }
 
 # The harness runs the hook from the project, so the repository root comes from the working
@@ -335,6 +363,9 @@ function Get-Context {
             # The reminder already arrived with the prompt; only the usage may have changed.
             $text = (Get-UsageLine $Harness) + "`n"
         }
+        'dispatch' {
+            $text = Get-DispatchBlockReason $Harness
+        }
         default {
             return $null
         }
@@ -376,14 +407,25 @@ function Format-HookOutput {
     param([string]$Harness, [string]$EventName, [string]$Context)
     $value = ConvertTo-JsonString $Context
     switch ($Harness) {
-        'claude' {
-            if ($EventName -eq 'subagent') {
-                # After a tool call, Claude Code passes hook output to the model only as JSON.
-                return "{`n  `"hookSpecificOutput`": {`n    `"hookEventName`": `"PostToolUse`",`n    `"additionalContext`": $value`n  }`n}`n"
+        { $_ -in @('claude', 'codex') } {
+            switch ($EventName) {
+                'subagent' {
+                    # After a tool call, both tools pass hook output to the model only as JSON.
+                    return "{`n  `"hookSpecificOutput`": {`n    `"hookEventName`": `"PostToolUse`",`n    `"additionalContext`": $value`n  }`n}`n"
+                }
+                'dispatch' {
+                    # No output lets the call through; a deny decision blocks it and tells the model why.
+                    if ($Context -eq '') {
+                        return ''
+                    }
+                    return "{`n  `"hookSpecificOutput`": {`n    `"hookEventName`": `"PreToolUse`",`n    `"permissionDecision`": `"deny`",`n    `"permissionDecisionReason`": $value`n  }`n}`n"
+                }
+                default {
+                    return $Context + "`n"
+                }
             }
-            return $Context + "`n"
         }
-        { $_ -in @('codex', 'kiro', 'opencode', 'amp') } {
+        { $_ -in @('kiro', 'opencode', 'amp') } {
             return $Context + "`n"
         }
         'gemini' {
@@ -404,18 +446,19 @@ function Format-HookOutput {
 function Invoke-Main {
     param([string[]]$Arguments)
     if ($Arguments.Count -ne 2) {
-        [Console]::Error.WriteLine('Usage: inject.ps1 <harness> <prompt|compact|subagent>')
+        [Console]::Error.WriteLine('Usage: inject.ps1 <harness> <prompt|compact|subagent|dispatch>')
         exit 2
     }
     $harness = $Arguments[0]
     $eventName = $Arguments[1]
-    if ($eventName -eq 'subagent' -and $harness -ne 'claude') {
-        [Console]::Error.WriteLine('inject.ps1: the subagent event is only for claude')
+    # Only these harnesses expose usage and have subagents with after- and before-tool hooks.
+    if ($eventName -in @('subagent', 'dispatch') -and $harness -notin @('claude', 'codex')) {
+        [Console]::Error.WriteLine("inject.ps1: the $eventName event is only for claude and codex")
         exit 2
     }
     $context = Get-Context $harness $eventName
     if ($null -eq $context) {
-        [Console]::Error.WriteLine("inject.ps1: unknown event '$eventName' (expected prompt, compact, or subagent)")
+        [Console]::Error.WriteLine("inject.ps1: unknown event '$eventName' (expected prompt, compact, subagent, or dispatch)")
         exit 2
     }
     $output = Format-HookOutput $harness $eventName $context

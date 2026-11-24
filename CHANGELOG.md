@@ -2,6 +2,18 @@
 
 All notable changes to Unlazier (called Unlazier AI before version 2.1) are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Subagent gate (Claude Code and Codex CLI):** a `PreToolUse` hook on the subagent tool (`Agent` in Claude Code, `spawn_agent` in Codex) blocks new helper agents while the 5-hour window is at 85% or more, or the weekly window at 99% or more, and tells the assistant to continue on its own (or to pause, for the weekly window). Below those levels it prints nothing, so it costs no tokens. With unknown usage it never blocks.
+- **Usage after each subagent in Codex CLI:** the `PostToolUse` hook that adds the usage line after each subagent call now covers Codex too. Approve the new hooks once with `/hooks`.
+- The installer tells you when `autoContinueAtUsageLimit` is off in Claude Code's user settings, because the session then waits for you after a usage limit. It never changes the setting.
+
+### Changed
+
+- **Codex CLI at 95% or more:** the assistant keeps working until the limit instead of finishing the step and stopping, because Codex lets the turn in progress go on past the limit and never resumes on its own afterwards. Codex then stops, and you continue after the reset.
+
 ## [2.2.0] - 2026-11-23
 
 ### Added

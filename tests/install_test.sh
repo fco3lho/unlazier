@@ -158,12 +158,18 @@ test_install_adds_all_layers() {
         '.hooks.SessionStart | any(.matcher == "compact")'
     check "Claude subagent usage hook" json_has "$home/.claude/settings.json" \
         '.hooks.PostToolUse | any(.matcher == "Agent" and (.hooks | any(.command | contains("inject.sh\" claude subagent"))))'
+    check "Claude subagent gate hook" json_has "$home/.claude/settings.json" \
+        '.hooks.PreToolUse | any(.matcher == "Agent" and (.hooks | any(.command | contains("inject.sh\" claude dispatch"))))'
     check "Claude status line installed" json_has "$home/.claude/settings.json" \
         '.statusLine.command | contains("claude-statusline.sh")'
     check "Claude status line refreshes every minute" json_has "$home/.claude/settings.json" \
         '.statusLine.refreshInterval == 60'
     check "Codex hooks registered" json_has "$home/.codex/hooks.json" \
         '[.hooks.UserPromptSubmit[].hooks[].command] | any(contains("inject.sh\" codex prompt"))'
+    check "Codex subagent usage hook" json_has "$home/.codex/hooks.json" \
+        '.hooks.PostToolUse | any(.matcher == "spawn_agent" and (.hooks | any(.command | contains("inject.sh\" codex subagent"))))'
+    check "Codex subagent gate hook" json_has "$home/.codex/hooks.json" \
+        '.hooks.PreToolUse | any(.matcher == "spawn_agent" and (.hooks | any(.command | contains("inject.sh\" codex dispatch"))))'
     check "Gemini hook registered" json_has "$home/.gemini/settings.json" \
         '[.hooks.BeforeAgent[].hooks[].command] | any(contains("inject.sh\" gemini prompt"))'
     check "Devin hook registered" json_has "$home/.config/devin/config.json" \
@@ -223,10 +229,16 @@ test_reinstall_is_idempotent() {
         '[.hooks.UserPromptSubmit[].hooks[] | select(.command | contains("unlazier"))] | length == 1'
     check "one Claude subagent usage hook" json_has "$home/.claude/settings.json" \
         '[.hooks.PostToolUse[].hooks[] | select(.command | contains("unlazier"))] | length == 1'
+    check "one Claude subagent gate hook" json_has "$home/.claude/settings.json" \
+        '[.hooks.PreToolUse[] | select(.matcher == "Agent") | .hooks[] | select(.command | contains("unlazier"))] | length == 1'
+    check "one Claude question alert next to the gate" has_alert_hook "$home/.claude/settings.json" PreToolUse AskUserQuestion
     check "one Claude end-of-turn alert" has_alert_hook "$home/.claude/settings.json" Stop
     check "one Codex end-of-turn alert" has_alert_hook "$home/.codex/hooks.json" Stop
     check "one Codex prompt hook" json_has "$home/.codex/hooks.json" \
         '[.hooks.UserPromptSubmit[].hooks[] | select(.command | contains("unlazier"))] | length == 1'
+    check "one Codex subagent gate hook" json_has "$home/.codex/hooks.json" \
+        '[.hooks.PreToolUse[] | select(.matcher == "spawn_agent") | .hooks[] | select(.command | contains("unlazier"))] | length == 1'
+    check "one Codex question alert next to the gate" has_alert_hook "$home/.codex/hooks.json" PreToolUse '^request_user_input$'
 }
 
 test_uninstall_restores_original_files() {
@@ -397,6 +409,9 @@ test_inject_usage_lines() {
             additionalContext: "Usage: 5h 24% | weekly unknown (source: Claude Code status line, 2 min old)"}'
     check "Codex usage line" test "$(last_line bash "$home/.codex/unlazier/inject.sh" codex prompt)" \
         = "Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old)"
+    check "Codex subagent context is only the usage line" json_has <(bash "$home/.codex/unlazier/inject.sh" codex subagent) \
+        '.hookSpecificOutput == {hookEventName: "PostToolUse",
+            additionalContext: "Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old)"}'
     check "Kiro usage unknown" test "$(last_line bash "$home/.kiro/unlazier/inject.sh" kiro prompt)" \
         = "Usage: unknown (this tool does not expose usage windows)"
 
@@ -484,6 +499,70 @@ test_inject_output_formats() {
         test "$(bash "$home/.gemini/unlazier/inject.sh" gemini subagent >/dev/null 2>&1; echo $?)" = "2"
 }
 
+# Writes a fresh Claude usage reading, or one captured the given number of seconds ago.
+write_claude_usage() {
+    local home="$1" five_hour="$2" weekly="$3" age="${4:-0}"
+    mkdir -p "$home/.claude/state"
+    jq -n --argjson now "$(date +%s)" --argjson five_hour "$five_hour" --argjson weekly "$weekly" \
+        --argjson age "$age" '{captured_at: ($now - $age),
+        five_hour: {used_percentage: $five_hour, resets_at: ($now + 3600)},
+        seven_day: {used_percentage: $weekly, resets_at: ($now + 86400)}}' > "$home/.claude/state/rate_limits.json"
+}
+
+dispatch_of() { bash "$1/.claude/unlazier/inject.sh" claude dispatch; }
+
+test_inject_dispatch_gate() {
+    local home now
+    echo "the subagent gate blocks only where the usage ladder forbids subagents"
+    home="$(new_home)"
+    now="$(date +%s)"
+    run_installer "$home" --harness claude,codex,gemini >/dev/null 2>&1
+
+    write_claude_usage "$home" 84.4 40
+    check "below 85% the gate allows" dispatch_of "$home"
+    check "below 85% the gate prints nothing" test -z "$(dispatch_of "$home")"
+    write_claude_usage "$home" 84.6 40
+    check "85% after rounding is denied" json_has <(dispatch_of "$home") \
+        '.hookSpecificOutput | .hookEventName == "PreToolUse" and .permissionDecision == "deny"
+            and (.permissionDecisionReason | startswith("Usage: 5h 85%") and contains("continue the work sequentially"))'
+    write_claude_usage "$home" 10 99
+    check "weekly 99% is denied with a pause" json_has <(dispatch_of "$home") \
+        '.hookSpecificOutput.permissionDecisionReason | contains("weekly window is at 99% or more")'
+    write_claude_usage "$home" 96 40 3600
+    check "a stale reading never blocks" test -z "$(dispatch_of "$home")"
+    rm -f "$home/.claude/state/rate_limits.json"
+    check "a missing reading never blocks" test -z "$(dispatch_of "$home")"
+
+    write_codex_rollout "$home" "$now"
+    check "Codex at 43% allows silently" test -z "$(bash "$home/.codex/unlazier/inject.sh" codex dispatch)"
+    mkdir -p "$home/.codex/sessions/2026/11/15"
+    jq -cn --arg timestamp "$(jq -rn --argjson epoch "$now" '$epoch | todate')" --argjson resets "$((now + 999))" \
+        '{timestamp: $timestamp, type: "event_msg", payload: {type: "token_count",
+            rate_limits: {primary: {used_percent: 90, window_minutes: 300, resets_at: $resets}}}}' \
+        > "$home/.codex/sessions/2026/11/15/rollout-2026-11-15T10-00-00-c.jsonl"
+    check "Codex at 90% is denied" json_has <(bash "$home/.codex/unlazier/inject.sh" codex dispatch) \
+        '.hookSpecificOutput | .permissionDecision == "deny"
+            and (.permissionDecisionReason | startswith("Usage: 5h 90%") and contains("source: Codex session log"))'
+    check "the gate is only for Claude and Codex" \
+        test "$(bash "$home/.gemini/unlazier/inject.sh" gemini dispatch >/dev/null 2>&1; echo $?)" = "2"
+}
+
+test_auto_continue_notice() {
+    local home output
+    echo "the installer reports auto-continue turned off without changing it"
+    home="$(new_home)"
+    mkdir -p "$home/.claude"
+    jq -n '{autoContinueAtUsageLimit: false}' > "$home/.claude/settings.json"
+    output="$(run_installer "$home" --harness claude 2>&1)"
+
+    check "the notice names the setting" test -n "$(printf '%s' "$output" | grep 'autoContinueAtUsageLimit is off')"
+    check "the setting stays off" json_has "$home/.claude/settings.json" '.autoContinueAtUsageLimit == false'
+    jq '.autoContinueAtUsageLimit = true' "$home/.claude/settings.json" > "$home/on.json" \
+        && mv "$home/on.json" "$home/.claude/settings.json"
+    output="$(run_installer "$home" --harness claude 2>&1)"
+    check "no notice when it is on" test -z "$(printf '%s' "$output" | grep 'autoContinueAtUsageLimit is off')"
+}
+
 test_upgrade_removes_obsolete_payload() {
     local home output
     echo "install removes obsolete payload files"
@@ -535,6 +614,8 @@ main() {
     test_inject_usage_lines
     test_inject_output_formats
     test_inject_project_rules
+    test_inject_dispatch_gate
+    test_auto_continue_notice
     test_upgrade_removes_obsolete_payload
     test_statusline_saves_usage
     test_cline_question_alert_filters_tools

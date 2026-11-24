@@ -341,12 +341,15 @@ param(
         return ($null -ne $command) -and ([string]$command).Contains('unlazier')
     }
 
+    # With a matcher, only entries for that matcher lose our commands, because one event can carry
+    # several of ours (Claude Code PreToolUse has both the question alert and the subagent gate).
     function Remove-OurHookEntries {
-        param([object[]]$Entries)
+        param([object[]]$Entries, $Matcher = $null)
         $kept = New-Object System.Collections.ArrayList
         foreach ($entry in $Entries) {
             $hooks = Get-JsonProperty $entry 'hooks'
-            if ($hooks -is [array]) {
+            $isTargeted = ($null -eq $Matcher) -or ([string](Get-JsonProperty $entry 'matcher') -eq $Matcher)
+            if ($isTargeted -and $hooks -is [array]) {
                 [object[]]$remaining = @($hooks | Where-Object { -not (Test-OurCommand $_) })
                 if ($remaining.Count -eq 0) {
                     continue
@@ -374,7 +377,7 @@ param(
             if ($existing -isnot [array]) {
                 return $false
             }
-            $entries = Remove-OurHookEntries $existing
+            $entries = Remove-OurHookEntries $existing $Matcher
         }
         $entry = [ordered]@{}
         if ($Matcher) {
@@ -461,17 +464,23 @@ param(
         switch ($Name) {
             'claude' {
                 # The reminder reaches the model only with a prompt; the PostToolUse hook refreshes
-                # the usage line after each subagent, the long step of a turn.
+                # the usage line after each subagent, the long step of a turn, and the PreToolUse
+                # hook blocks a new subagent while the usage ladder forbids one.
                 return Update-HookConfig ([System.IO.Path]::Combine($harnessHome, 'settings.json')) @(
                     (New-Registration 'UserPromptSubmit' '' (Get-HookCommand 'claude' 'prompt')),
                     (New-Registration 'SessionStart' 'compact' (Get-HookCommand 'claude' 'compact')),
-                    (New-Registration 'PostToolUse' 'Agent' (Get-HookCommand 'claude' 'subagent'))
+                    (New-Registration 'PostToolUse' 'Agent' (Get-HookCommand 'claude' 'subagent')),
+                    (New-Registration 'PreToolUse' 'Agent' (Get-HookCommand 'claude' 'dispatch'))
                 )
             }
             'codex' {
+                # Same usage hooks as Claude Code. The matcher is unanchored so it also matches the
+                # namespaced spawn_agent of Codex's opt-in multi_agent_v2.
                 $isUpdated = Update-HookConfig ([System.IO.Path]::Combine($harnessHome, 'hooks.json')) @(
                     (New-Registration 'UserPromptSubmit' '' (Get-HookCommand 'codex' 'prompt')),
-                    (New-Registration 'SessionStart' 'compact' (Get-HookCommand 'codex' 'compact'))
+                    (New-Registration 'SessionStart' 'compact' (Get-HookCommand 'codex' 'compact')),
+                    (New-Registration 'PostToolUse' 'spawn_agent' (Get-HookCommand 'codex' 'subagent')),
+                    (New-Registration 'PreToolUse' 'spawn_agent' (Get-HookCommand 'codex' 'dispatch'))
                 )
                 if ($isUpdated) {
                     Add-Notice 'Codex: open Codex and run /hooks once to trust the Unlazier hooks.'
@@ -1101,6 +1110,23 @@ param(
         param([string]$Name)
         $harnessHome = Get-HarnessHome $Name
         switch ($Name) {
+            'claude' {
+                # Read only to explain what happens at the usage limit; the user's choice is never
+                # changed.
+                $settings = [System.IO.Path]::Combine($harnessHome, 'settings.json')
+                if (Test-Path -LiteralPath $settings -PathType Leaf) {
+                    try {
+                        $document = ConvertFrom-JsonText (Read-TextFile $settings).Text
+                    } catch {
+                        # Register-Hooks reads the same file and reports it as invalid.
+                        $document = $null
+                    }
+                    $autoContinue = Get-JsonProperty $document 'autoContinueAtUsageLimit'
+                    if ($autoContinue -is [bool] -and -not $autoContinue) {
+                        Add-Notice 'Claude Code: autoContinueAtUsageLimit is off, so after a usage limit the session waits for you instead of continuing the task on its own. Unlazier keeps your choice; turn it on in /config, or start a single wait from /rate-limit-options.'
+                    }
+                }
+            }
             'codex' {
                 $override = [System.IO.Path]::Combine($harnessHome, 'AGENTS.override.md')
                 if (Test-Path -LiteralPath $override -PathType Leaf) {
