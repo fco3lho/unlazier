@@ -711,6 +711,30 @@ function Test-InvalidJsonLeftUntouched {
     Assert-That 'rules still installed' { Test-HasAllRuleFiles (Join-TestPath $testHome '.claude/rules') }
 }
 
+function Get-DeepValue {
+    param([string]$Path, [int]$Levels)
+    $node = (Read-TestJson $Path).deep
+    for ($level = 0; $level -lt $Levels; $level++) {
+        $node = $node.n
+    }
+    return $node
+}
+
+# ConvertTo-Json turns whatever lies deeper than its -Depth into a string, silently on Windows
+# PowerShell 5.1.
+function Test-DeepConfigKept {
+    Write-Host 'deeply nested user settings survive install and uninstall'
+    $testHome = New-TestHome
+    $settingsPath = Join-TestPath $testHome '.claude/settings.json'
+    $levels = 30
+    Write-TestFile $settingsPath ('{"deep":' + ('{"n":' * $levels) + '"kept"' + ('}' * $levels) + "}`n")
+    [void](Invoke-Installer $testHome @('-Harness', 'claude'))
+
+    Assert-That 'install keeps the deepest value' { (Get-DeepValue $settingsPath $levels) -eq 'kept' }
+    [void](Invoke-Uninstaller $testHome @('-Harness', 'claude'))
+    Assert-That 'uninstall keeps the deepest value' { (Get-DeepValue $settingsPath $levels) -eq 'kept' }
+}
+
 function Get-UnixNow {
     return [System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 }
@@ -1069,6 +1093,7 @@ try {
     Test-UpgradeFromV20Layout
     Test-UnsafeHomeRefused
     Test-InvalidJsonLeftUntouched
+    Test-DeepConfigKept
     Test-InjectUsageLines
     Test-InjectOutputFormats
     Test-InjectProjectRules

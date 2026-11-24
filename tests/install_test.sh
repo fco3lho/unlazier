@@ -489,6 +489,21 @@ test_invalid_json_left_untouched() {
     check "rules still installed" has_all_rule_files "$home/.claude/rules"
 }
 
+# install.ps1 once flattened settings nested deeper than 20 levels; both installers must keep them.
+test_deep_config_kept() {
+    local home deepest
+    echo "deeply nested user settings survive install and uninstall"
+    home="$(new_home)"
+    mkdir -p "$home/.claude"
+    jq -n '{deep: (reduce range(30) as $level ("kept"; {n: .}))}' > "$home/.claude/settings.json"
+    deepest='.deep | getpath([range(30) | "n"]) == "kept"'
+    run_installer "$home" --harness claude >/dev/null 2>&1
+
+    check "install keeps the deepest value" json_has "$home/.claude/settings.json" "$deepest"
+    run_uninstaller "$home" --harness claude >/dev/null 2>&1
+    check "uninstall keeps the deepest value" json_has "$home/.claude/settings.json" "$deepest"
+}
+
 # Builds a PATH with the tools the installer needs, minus jq.
 path_without_jq() {
     local directory tool
@@ -768,6 +783,7 @@ main() {
     test_upgrade_from_v2_0_layout
     test_unsafe_home_refused
     test_invalid_json_left_untouched
+    test_deep_config_kept
     test_missing_jq_installs_rules_only
     test_inject_usage_lines
     test_inject_output_formats

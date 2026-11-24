@@ -347,15 +347,17 @@ param(
         return $document
     }
 
+    # ConvertTo-Json turns whatever lies deeper than -Depth into a string, silently on Windows
+    # PowerShell 5.1, so the depth is set well above what a hand-written config reaches.
     function Write-JsonConfig {
         param([string]$Path, $Document)
-        $json = (ConvertTo-Json -InputObject $Document -Depth 20) -replace "`r`n", "`n"
+        $json = (ConvertTo-Json -InputObject $Document -Depth 100) -replace "`r`n", "`n"
         Write-TextFile $Path ($json + "`n") $false
     }
 
     function ConvertTo-CompactJson {
         param($Document)
-        return ConvertTo-Json -InputObject $Document -Depth 20 -Compress
+        return ConvertTo-Json -InputObject $Document -Depth 100 -Compress
     }
 
     # Claude Code, Codex, Gemini CLI, and Devin share the same hook layout:
