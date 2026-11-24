@@ -812,6 +812,31 @@ function Test-InjectUsageLines {
     }
 }
 
+function Test-InjectCodexDamagedLog {
+    Write-Host 'a damaged Codex log keeps its latest reading'
+    $testHome = New-TestHome
+    $now = Get-UnixNow
+    [void](Invoke-Installer $testHome @('-Harness', 'codex'))
+    $timestamp = [System.DateTimeOffset]::FromUnixTimeSeconds($now - 60).UtcDateTime.ToString(
+        "yyyy-MM-dd'T'HH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
+    $readings = @(10, 30, 42 | ForEach-Object {
+        ConvertTo-Json -Depth 10 -Compress -InputObject ([pscustomobject]@{
+            timestamp = $timestamp; type = 'event_msg'
+            payload = [pscustomobject]@{ type = 'token_count'; rate_limits = [pscustomobject]@{
+                primary = [pscustomobject]@{ used_percent = $_; window_minutes = 300; resets_at = $now + 999 } } }
+        })
+    })
+    $cut = '{"timestamp":"' + $timestamp + '","type":"event_msg","payload":{"type":"token_count","rate_li'
+    # A write cut short by a crash is followed on the same line by the next event, and the last
+    # line is half-written while Codex appends to the log.
+    $lines = @($readings[0], ($cut + $readings[1]), '{"type":"response_item","payload":{"type":"message","content":"cut',
+        $readings[2], $cut)
+    Write-TestFile (Join-TestPath $testHome '.codex/sessions/2026/11/14/rollout-2026-11-14T10-00-00-b.jsonl') ($lines -join "`n")
+    Assert-That 'broken lines before the reading and a half-written last line are skipped' {
+        (Get-LastLine (Invoke-Inject $testHome '.codex' 'codex' 'prompt')) -eq 'Usage: 5h 42% | weekly unknown (source: Codex session log, 1 min old)'
+    }
+}
+
 # A damaged reading must degrade to the expected usage line: the prompt keeps its reminder and
 # exits 0, the subagent event still reports usage, and the gate allows the call.
 function Assert-DegradedUsage {
@@ -1178,6 +1203,7 @@ try {
     Test-DeepConfigKept
     Test-InjectUsageLines
     Test-InjectMalformedUsage
+    Test-InjectCodexDamagedLog
     Test-InjectOutputFormats
     Test-InjectProjectRules
     Test-InjectDispatchGate

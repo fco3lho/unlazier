@@ -579,6 +579,37 @@ test_inject_usage_lines() {
         = "Usage: unknown (no usage reading from the last 15 minutes)"
 }
 
+# Prints one Codex token_count event with a 5-hour window, as the session log stores it.
+codex_reading() {
+    jq -cn --arg timestamp "$1" --argjson percent "$2" --argjson resets "$3" '{timestamp: $timestamp,
+        type: "event_msg", payload: {type: "token_count", rate_limits: {
+            primary: {used_percent: $percent, window_minutes: 300, resets_at: $resets}}}}'
+}
+
+test_inject_codex_damaged_log() {
+    local home now timestamp cut
+    echo "a damaged Codex log keeps its latest reading"
+    home="$(new_home)"
+    now="$(date +%s)"
+    run_installer "$home" --harness codex >/dev/null 2>&1
+    timestamp="$(jq -rn --argjson epoch "$((now - 60))" '$epoch | todate')"
+    cut="{\"timestamp\":\"$timestamp\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"rate_li"
+    mkdir -p "$home/.codex/sessions/2026/11/14"
+    # A write cut short by a crash is followed on the same line by the next event, and the last
+    # line is half-written while Codex appends to the log.
+    {
+        codex_reading "$timestamp" 10 "$((now + 999))"
+        printf '%s' "$cut"
+        codex_reading "$timestamp" 30 "$((now + 999))"
+        printf '%s\n' '{"type":"response_item","payload":{"type":"message","content":"cut'
+        codex_reading "$timestamp" 42 "$((now + 999))"
+        printf '%s' "$cut"
+    } > "$home/.codex/sessions/2026/11/14/rollout-2026-11-14T10-00-00-b.jsonl"
+    check "broken lines before the reading and a half-written last line are skipped" \
+        test "$(last_line bash "$home/.codex/unlazier/inject.sh" codex prompt)" \
+        = "Usage: 5h 42% | weekly unknown (source: Codex session log, 1 min old)"
+}
+
 # A damaged reading must degrade to the expected usage line: the prompt keeps its reminder and
 # exits 0, the subagent event still reports usage, and the gate allows the call.
 check_degraded_usage() {
@@ -853,6 +884,7 @@ main() {
     test_missing_jq_installs_rules_only
     test_inject_usage_lines
     test_inject_malformed_usage
+    test_inject_codex_damaged_log
     test_inject_output_formats
     test_inject_project_rules
     test_inject_dispatch_gate

@@ -105,8 +105,13 @@ read_codex_usage() {
     # lexicographic maximum is the most recent session.
     newest_rollout="$(find "$sessions_dir" -type f -name 'rollout-*.jsonl' | sort | tail -n 1)"
     [ -n "$newest_rollout" ] || return 1
-    last_event="$(jq -c 'select(.type == "event_msg" and .payload.type == "token_count"
-        and .payload.rate_limits != null)' "$newest_rollout" 2>/dev/null | tail -n 1)"
+    # The log grows with the session and is read before and after every subagent call, so grep keeps
+    # only token_count lines and awk puts the newest first, letting jq stop at the first reading.
+    # Each line is parsed on its own: one broken by a crash or still being written hides no other.
+    last_event="$(grep -F '"token_count"' "$newest_rollout" 2>/dev/null \
+        | awk '{ lines[NR] = $0 } END { for (number = NR; number > 0; number--) print lines[number] }' \
+        | jq -cnR 'first(inputs | (fromjson | select(.type == "event_msg" and .payload.type == "token_count"
+            and .payload.rate_limits != null))?)')"
     [ -n "$last_event" ] || return 1
     printf '%s' "$last_event" | jq -c "$CODEX_USAGE_PROGRAM" 2>/dev/null
 }
