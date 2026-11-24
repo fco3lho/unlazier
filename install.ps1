@@ -40,7 +40,7 @@ param(
     $AllHarnesses = @('claude', 'opencode', 'codex', 'copilot', 'gemini', 'amp', 'kiro', 'cline', 'devin')
     $RuleNames = @('structure', 'correctness', 'style', 'completeness', 'performance', 'testability', 'async',
         'naming', 'documentation', 'parallelism')
-    $PayloadFiles = @('AGENTS.md', 'reminder.md', 'hooks/inject.ps1', 'hooks/alert.ps1', 'hooks/wait-usage.ps1',
+    $PayloadFiles = @('AGENTS.md', 'reminder.md', 'hooks/inject.ps1', 'hooks/alert.ps1',
         'statusline/claude-statusline.ps1', 'plugins/opencode.ts', 'plugins/amp.ts')
     $MarkerStart = '<!-- unlazier:start -->'
     $MarkerEnd = '<!-- unlazier:end -->'
@@ -460,9 +460,12 @@ param(
         $harnessHome = Get-HarnessHome $Name
         switch ($Name) {
             'claude' {
+                # The reminder reaches the model only with a prompt; the PostToolUse hook refreshes
+                # the usage line after each subagent, the long step of a turn.
                 return Update-HookConfig ([System.IO.Path]::Combine($harnessHome, 'settings.json')) @(
                     (New-Registration 'UserPromptSubmit' '' (Get-HookCommand 'claude' 'prompt')),
-                    (New-Registration 'SessionStart' 'compact' (Get-HookCommand 'claude' 'compact'))
+                    (New-Registration 'SessionStart' 'compact' (Get-HookCommand 'claude' 'compact')),
+                    (New-Registration 'PostToolUse' 'Agent' (Get-HookCommand 'claude' 'subagent'))
                 )
             }
             'codex' {
@@ -795,6 +798,19 @@ param(
         Remove-RuleFiles $folder
     }
 
+    # Deletes each path that is an existing file; returns whether it deleted any.
+    function Remove-ExistingFiles {
+        param([string[]]$Paths)
+        $removed = $false
+        foreach ($path in $Paths) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                Remove-Item -LiteralPath $path -Force
+                $removed = $true
+            }
+        }
+        return $removed
+    }
+
     # Removes what version 2.0 installed under its old name, so it does not load next to the
     # renamed files. Hook entries, the status line, and rule files need nothing extra: their
     # names contain "unlazier", which matches both names.
@@ -813,11 +829,7 @@ param(
             { $_ -in @('opencode', 'amp') } { $legacyFiles = @([System.IO.Path]::Combine($harnessHome, 'plugins', "$LegacyName.ts")) }
             'kiro' { $legacyFiles = @([System.IO.Path]::Combine($harnessHome, 'hooks', "$LegacyName.json")) }
         }
-        foreach ($path in $legacyFiles) {
-            if (Test-Path -LiteralPath $path -PathType Leaf) {
-                Remove-Item -LiteralPath $path -Force
-            }
-        }
+        [void](Remove-ExistingFiles $legacyFiles)
         $legacyFolder = [System.IO.Path]::Combine($harnessHome, $LegacyName)
         if (Test-Path -LiteralPath $legacyFolder -PathType Container) {
             Remove-Item -LiteralPath $legacyFolder -Recurse -Force
@@ -834,10 +846,17 @@ param(
             $source = [System.IO.Path]::Combine($State.SourceDirectory, $relativePath)
             Copy-Item -LiteralPath $source -Destination ([System.IO.Path]::Combine($target, (Split-Path -Leaf $relativePath))) -Force
         }
-        # Only Claude Code saves its usage to a file that a background task can poll.
-        if ($Name -eq 'claude') {
-            Copy-Item -LiteralPath ([System.IO.Path]::Combine($State.SourceDirectory, 'hooks', 'wait-usage.ps1')) `
-                -Destination ([System.IO.Path]::Combine($target, 'wait-usage.ps1')) -Force
+    }
+
+    # Builds from main before 2.2.0 installed background waiters into the payload folder. They
+    # are deleted only after the new rules are written, so the rules on disk never call a missing
+    # script; sessions opened before the upgrade still hold the old rules, hence the notice.
+    function Remove-ObsoleteWaiters {
+        param([string]$Name)
+        $target = [System.IO.Path]::Combine((Get-HarnessHome $Name), $PayloadDirectoryName)
+        $waiters = @('wait-usage.sh', 'wait-usage.ps1') | ForEach-Object { [System.IO.Path]::Combine($target, $_) }
+        if (Remove-ExistingFiles $waiters) {
+            Add-Notice "$(Get-HarnessLabel $Name): restart sessions opened before this install; their rules still call the removed wait-usage script."
         }
     }
 
@@ -1107,6 +1126,7 @@ param(
         Remove-LegacyNames $Name
         Install-Payload $Name
         Install-Rules $Name
+        Remove-ObsoleteWaiters $Name
         if ($Name -in @('opencode', 'amp')) {
             # One plugin carries both the reminder and the alerts.
             [void](Register-Hooks $Name)

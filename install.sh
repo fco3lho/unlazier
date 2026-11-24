@@ -23,7 +23,7 @@ RAW_BASE="https://raw.githubusercontent.com/$REPO/$BRANCH"
 
 ALL_HARNESSES="claude opencode codex copilot gemini amp kiro cline devin"
 RULE_NAMES="structure correctness style completeness performance testability async naming documentation parallelism"
-PAYLOAD_FILES="AGENTS.md reminder.md hooks/inject.sh hooks/alert.sh hooks/wait-usage.sh statusline/claude-statusline.sh plugins/opencode.ts plugins/amp.ts"
+PAYLOAD_FILES="AGENTS.md reminder.md hooks/inject.sh hooks/alert.sh statusline/claude-statusline.sh plugins/opencode.ts plugins/amp.ts"
 MARKER_START="<!-- unlazier:start -->"
 MARKER_END="<!-- unlazier:end -->"
 PAYLOAD_DIR_NAME="unlazier"
@@ -216,9 +216,13 @@ register_hooks() {
     home="$(harness_home "$harness")"
     case "$harness" in
         claude)
+            # The reminder reaches the model only with a prompt; the PostToolUse hook refreshes the
+            # usage line after each subagent, the long step of a turn.
             update_json_file "$home/settings.json" \
-                'add_hook("UserPromptSubmit"; ""; $prompt) | add_hook("SessionStart"; "compact"; $compact)' \
-                --arg prompt "$(hook_command claude prompt)" --arg compact "$(hook_command claude compact)"
+                'add_hook("UserPromptSubmit"; ""; $prompt) | add_hook("SessionStart"; "compact"; $compact)
+                 | add_hook("PostToolUse"; "Agent"; $subagent)' \
+                --arg prompt "$(hook_command claude prompt)" --arg compact "$(hook_command claude compact)" \
+                --arg subagent "$(hook_command claude subagent)"
             ;;
         codex)
             update_json_file "$home/hooks.json" \
@@ -534,10 +538,22 @@ install_payload() {
     mkdir -p "$target"
     cp "$SOURCE_DIR/AGENTS.md" "$SOURCE_DIR/reminder.md" "$SOURCE_DIR/hooks/inject.sh" "$SOURCE_DIR/hooks/alert.sh" "$target/"
     chmod +x "$target/inject.sh" "$target/alert.sh"
-    # Only Claude Code saves its usage to a file that a background task can poll.
-    if [ "$harness" = "claude" ]; then
-        cp "$SOURCE_DIR/hooks/wait-usage.sh" "$target/"
-        chmod +x "$target/wait-usage.sh"
+}
+
+# Builds from main before 2.2.0 installed background waiters into the payload folder. They are
+# deleted only after the new rules are written, so the rules on disk never call a missing script;
+# sessions opened before the upgrade still hold the old rules, hence the notice.
+remove_obsolete_waiters() {
+    local harness="$1" target name found=false
+    target="$(harness_home "$harness")/$PAYLOAD_DIR_NAME"
+    for name in wait-usage.sh wait-usage.ps1; do
+        if [ -f "$target/$name" ]; then
+            rm -f "$target/$name"
+            found=true
+        fi
+    done
+    if [ "$found" = true ]; then
+        add_notice "$(harness_label "$harness"): restart sessions opened before this install; their rules still call the removed wait-usage script."
     fi
 }
 
@@ -783,6 +799,7 @@ install_harness() {
     remove_legacy_names "$harness"
     install_payload "$harness"
     install_rules "$harness"
+    remove_obsolete_waiters "$harness"
     case "$harness" in
         opencode|amp)
             # One plugin carries both the reminder and the alerts, and needs no jq.

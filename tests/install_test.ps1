@@ -266,6 +266,10 @@ function Test-InstallAddsAllLayers {
         @(Get-HookCommands $claudeSettings 'UserPromptSubmit' | Where-Object { $_.Contains('inject.ps1" claude prompt') }).Count -eq 1
     }
     Assert-That 'Claude compaction hook' { @($claudeSettings.hooks.SessionStart | Where-Object { $_.matcher -eq 'compact' }).Count -eq 1 }
+    Assert-That 'Claude subagent usage hook' {
+        @($claudeSettings.hooks.PostToolUse | Where-Object { $_.matcher -eq 'Agent' } | ForEach-Object { $_.hooks } |
+            Where-Object { $_.command.Contains('inject.ps1" claude subagent') }).Count -eq 1
+    }
     Assert-That 'Claude status line installed' { $claudeSettings.statusLine.command.Contains('claude-statusline.ps1') }
     Assert-That 'Claude status line refreshes every minute' { $claudeSettings.statusLine.refreshInterval -eq 60 }
     Assert-That 'Codex hooks registered' {
@@ -333,6 +337,10 @@ function Test-ReinstallIsIdempotent {
     Assert-That 'one block in Codex AGENTS.md' { (Get-BlockCount (Join-TestPath $testHome '.codex/AGENTS.md')) -eq 1 }
     Assert-That 'one Claude prompt hook' {
         @(Get-HookCommands (Read-TestJson (Join-TestPath $testHome '.claude/settings.json')) 'UserPromptSubmit' |
+            Where-Object { $_.Contains('unlazier') }).Count -eq 1
+    }
+    Assert-That 'one Claude subagent usage hook' {
+        @(Get-HookCommands (Read-TestJson (Join-TestPath $testHome '.claude/settings.json')) 'PostToolUse' |
             Where-Object { $_.Contains('unlazier') }).Count -eq 1
     }
     Assert-That 'one Codex prompt hook' {
@@ -516,6 +524,11 @@ function Test-InjectUsageLines {
     Assert-That 'Claude usage line' {
         (Get-LastLine (Invoke-Inject $testHome '.claude' 'claude' 'prompt')) -eq 'Usage: 5h 24% | weekly unknown (source: Claude Code status line, 2 min old)'
     }
+    Assert-That 'Claude subagent context is only the usage line' {
+        $output = (ConvertFrom-OutputJson (Invoke-Inject $testHome '.claude' 'claude' 'subagent')).hookSpecificOutput
+        $output.hookEventName -eq 'PostToolUse' -and
+            $output.additionalContext -eq 'Usage: 5h 24% | weekly unknown (source: Claude Code status line, 2 min old)'
+    }
     Assert-That 'Codex usage line' {
         (Get-LastLine (Invoke-Inject $testHome '.codex' 'codex' 'prompt')) -eq 'Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old)'
     }
@@ -528,82 +541,6 @@ function Test-InjectUsageLines {
     Write-TestJson $stateFile $state
     Assert-That 'stale Claude reading is unknown' {
         (Get-LastLine (Invoke-Inject $testHome '.claude' 'claude' 'prompt')) -eq 'Usage: unknown (no usage reading from the last 15 minutes)'
-    }
-}
-
-# Writes a usage snapshot with one window; a null ResetsAt leaves the field out.
-function Write-RateLimits {
-    param([string]$TestHome, [string]$Window, $Used, $ResetsAt = $null)
-    $entry = [ordered]@{ used_percentage = $Used }
-    if ($null -ne $ResetsAt) {
-        $entry['resets_at'] = $ResetsAt
-    }
-    Write-TestJson (Join-TestPath $TestHome '.claude/state/rate_limits.json') ([pscustomobject]@{ $Window = [pscustomobject]$entry })
-}
-
-function Invoke-WaitUsage {
-    param([string]$TestHome, [string[]]$Arguments)
-    return Invoke-TestScript $TestHome (Join-TestPath $TestHome '.claude/unlazier/wait-usage.ps1') $Arguments
-}
-
-function Test-WaitUsageExits {
-    Write-Host 'wait-usage ends with one line per reason'
-    $testHome = New-TestHome
-    $now = Get-UnixNow
-    [void](Invoke-Installer $testHome @('-Harness', 'claude,codex'))
-    $scriptPath = Join-TestPath $testHome '.claude/unlazier/wait-usage.ps1'
-    $stateFile = Join-TestPath $testHome '.claude/state/rate_limits.json'
-    $guard = @('-Interval', '1', '-MaxWait', '10')
-
-    Assert-That 'script installed for Claude Code' { Test-Path -LiteralPath $scriptPath -PathType Leaf }
-    Assert-That 'script not installed for Codex' {
-        -not (Test-Path -LiteralPath (Join-TestPath $testHome '.codex/unlazier/wait-usage.ps1'))
-    }
-    Assert-That 'missing state file fails fast' { (Invoke-WaitUsage $testHome $guard).ExitCode -eq 1 }
-
-    Write-RateLimits $testHome 'seven_day' 30
-    Assert-That 'missing window fails fast' { (Invoke-WaitUsage $testHome $guard).ExitCode -eq 1 }
-    Assert-That 'unknown option is a usage error' { (Invoke-WaitUsage $testHome @('-Unknown')).ExitCode -eq 2 }
-    Assert-That 'invalid number is a usage error' { (Invoke-WaitUsage $testHome @('-StopAt', 'ninety')).ExitCode -eq 2 }
-
-    Write-RateLimits $testHome 'five_hour' 24 ($now - 120)
-    Assert-That 'passed reset time ends the wait' {
-        (Get-LastLine (Invoke-WaitUsage $testHome ($guard + @('-Grace', '60')))) -eq 'reset used=24 start=24'
-    }
-
-    Write-RateLimits $testHome 'five_hour' 96
-    Assert-That 'usage at the stop level ends the wait' {
-        (Get-LastLine (Invoke-WaitUsage $testHome ($guard + @('-StopAt', '95')))) -eq 'threshold used=96 stop_at=95'
-    }
-
-    Write-RateLimits $testHome 'seven_day' 99
-    Assert-That 'weekly window can be watched' {
-        (Get-LastLine (Invoke-WaitUsage $testHome ($guard + @('-Window', 'seven_day', '-StopAt', '99')))) -eq 'threshold used=99 stop_at=99'
-    }
-
-    Write-RateLimits $testHome 'five_hour' 50
-    Assert-That 'no reset time ends only by timeout' {
-        (Get-LastLine (Invoke-WaitUsage $testHome @('-Interval', '1', '-MaxWait', '2'))) -eq 'timeout used=50'
-    }
-
-    $otherFile = Join-TestPath $testHome 'other.json'
-    Copy-Item -LiteralPath $stateFile -Destination $otherFile
-    Remove-Item -LiteralPath $stateFile
-    Assert-That 'state option replaces the default file' {
-        (Get-LastLine (Invoke-WaitUsage $testHome @('-Interval', '1', '-MaxWait', '2', '-State', $otherFile))) -eq 'timeout used=50'
-    }
-
-    Write-RateLimits $testHome 'five_hour' 50 ($now + 3600)
-    $waiterOutput = Join-TestPath $testHome 'waiter.out'
-    $waiter = Start-Process -FilePath $PowerShellPath -PassThru -NoNewWindow -RedirectStandardOutput $waiterOutput `
-        -ArgumentList (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$scriptPath`"") + $guard)
-    Start-Sleep -Seconds 2
-    Write-TestFile $stateFile '{"five_hour": {"used_perc'
-    Start-Sleep -Seconds 2
-    Write-RateLimits $testHome 'five_hour' 10 ($now + 3600)
-    [void]$waiter.WaitForExit(20000)
-    Assert-That 'usage drop ends the wait after a torn snapshot' {
-        [System.IO.File]::ReadAllText($waiterOutput).Trim() -eq 'dropped used=10 start=50'
     }
 }
 
@@ -633,6 +570,7 @@ function Test-InjectOutputFormats {
         (ConvertFrom-OutputJson (Invoke-Inject $testHome 'Documents/Cline' 'cline' 'prompt')).contextModification.StartsWith('Unlazier rules')
     }
     Assert-That 'unknown event fails' { (Invoke-Inject $testHome '.claude' 'claude' 'other').ExitCode -eq 2 }
+    Assert-That 'subagent event fails outside Claude' { (Invoke-Inject $testHome '.gemini' 'gemini' 'subagent').ExitCode -eq 2 }
 }
 
 # Runs inject.ps1 for the harness from the given directory, as the harness does from the project.
@@ -728,6 +666,32 @@ function Test-InjectProjectRules {
     }
 }
 
+function Test-UpgradeRemovesObsoletePayload {
+    Write-Host 'install removes obsolete payload files'
+    $testHome = New-TestHome
+    $payload = Join-TestPath $testHome '.claude/unlazier'
+    Write-TestFile (Join-TestPath $payload 'wait-usage.sh') 'old'
+    Write-TestFile (Join-TestPath $payload 'wait-usage.ps1') 'old'
+    Write-TestFile (Join-TestPath $payload 'other.txt') 'keep'
+    $result = Invoke-Installer $testHome @('-Harness', 'claude')
+
+    Assert-That 'open sessions told to restart' {
+        @($result.Lines | Where-Object { $_ -like '*restart sessions opened before*' }).Count -eq 1
+    }
+    Assert-That 'no restart notice without waiters' {
+        @((Invoke-Installer $testHome @('-Harness', 'claude')).Lines | Where-Object { $_ -like '*restart sessions opened before*' }).Count -eq 0
+    }
+    Assert-That 'obsolete shell waiter removed' {
+        -not (Test-Path -LiteralPath (Join-TestPath $payload 'wait-usage.sh'))
+    }
+    Assert-That 'obsolete PowerShell waiter removed' {
+        -not (Test-Path -LiteralPath (Join-TestPath $payload 'wait-usage.ps1'))
+    }
+    Assert-That 'other files in the folder kept' {
+        Test-Path -LiteralPath (Join-TestPath $payload 'other.txt') -PathType Leaf
+    }
+}
+
 function Test-StatusLineSavesUsage {
     Write-Host 'Claude status line shows and saves usage'
     $testHome = New-TestHome
@@ -764,8 +728,8 @@ try {
     Test-InjectUsageLines
     Test-InjectOutputFormats
     Test-InjectProjectRules
+    Test-UpgradeRemovesObsoletePayload
     Test-StatusLineSavesUsage
-    Test-WaitUsageExits
 } finally {
     foreach ($name in $IsolatedVariables) {
         [Environment]::SetEnvironmentVariable($name, $originalEnvironment[$name])

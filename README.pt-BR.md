@@ -148,11 +148,11 @@ Assinaturas como as do Claude e do ChatGPT limitam quanto você pode usar numa j
 | abaixo de 70% | Roda em paralelo o máximo de trabalho que conseguir |
 | de 70% a 85% | Roda no máximo 2 tarefas ao mesmo tempo |
 | de 85% a 95% | Trabalha numa tarefa por vez, sem agentes auxiliares |
-| 95% ou mais | Para os agentes auxiliares em andamento, espera em segundo plano a janela reiniciar e retoma o trabalho sozinho |
+| 95% ou mais | Trabalha numa tarefa por vez, em passos pequenos que deixam o trabalho consistente; no limite, veja abaixo |
 
 Quando a janela **semanal** chega a 99%, o assistente termina o passo atual, avisa você e espera.
 
-No **Claude Code**, a espera aos 95% é um script que o Unlazier instala (`~/.claude/unlazier/wait-usage.sh`, ou `wait-usage.ps1` no Windows). Ele lê o uso salvo e termina quando a janela reinicia, o que acorda o assistente. As outras ferramentas não são acordadas por uma tarefa em segundo plano, então terminam o passo atual, avisam você e esperam.
+No **limite de uso**, quem decide é a ferramenta. O Claude Code v2.1.234 ou mais recente pode [esperar na sessão aberta e continuar a tarefa](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset) após o reinício de um limite da assinatura claude.ai. Isso vem ligado por padrão, e você controla com `autoContinueAtUsageLimit` nas configurações de usuário, no `/config` ou no `/rate-limit-options` (onde também pode iniciar ou cancelar uma espera). Por isso, no Claude Code o assistente continua trabalhando até o limite em vez de parar antes, e o Claude Code então espera e continua, ou deixa o próximo passo com você, conforme a sua escolha. O Unlazier não altera essa configuração nem inicia uma espera própria. As outras ferramentas não oferecem essa espera, então nelas o assistente termina o passo atual, avisa você e espera.
 
 Quando paraleliza, ele prefere, nesta ordem: agentes auxiliares para partes da mesma tarefa, depois tarefas diferentes do mesmo pedido, depois pedidos diferentes.
 
@@ -171,7 +171,7 @@ Quando paraleliza, ele prefere, nesta ordem: agentes auxiliares para partes da m
     {"captured_at": 1794668291, "five_hour": {"used_percentage": 24, "resets_at": 1794683400}, "seven_day": {"used_percentage": 60, "resets_at": 1794978000}}
     ```
 
-    `captured_at` é o horário atual em segundos. Os dados de uso só existem nos planos de assinatura do Claude, não com chave de API.
+    `captured_at` é o horário atual em segundos. Os dados de uso só existem nos planos de assinatura do Claude, não com chave de API. A linha de uso também chega após cada chamada de subagente, então o assistente vê o uso subir durante um turno longo.
 - **Codex CLI** grava o uso no próprio log de sessão, que o lembrete lê. Não é preciso configurar nada.
 - **As outras ferramentas** não expõem o uso, então o lembrete diz `Usage: unknown`. Nesse caso, o assistente roda no máximo 2 a 3 tarefas ao mesmo tempo e pergunta a você antes de rodar mais de 5.
 
@@ -299,7 +299,6 @@ Organização do repositório:
 | `reminder.md` | O lembrete curto (camada 2). |
 | `hooks/inject.sh`, `hooks/inject.ps1` | Imprime o lembrete e a linha de uso (camadas 2 e 3) no formato que cada ferramenta espera. |
 | `hooks/alert.sh`, `hooks/alert.ps1` | Toca os bipes de alerta (camada 4). |
-| `hooks/wait-usage.sh`, `hooks/wait-usage.ps1` | Espera em segundo plano uma janela de uso reiniciar ou chegar a um limite; instalado só para o Claude Code. |
 | `statusline/` | Status line do Claude Code que salva o uso para o lembrete. |
 | `plugins/` | Plugins do OpenCode e do Amp, que chamam o mesmo script de hook. |
 | `install.sh`, `install.ps1` | Instaladores; cada ferramenta é um adaptador numa mesma tabela. Os `uninstall.*` chamam os instaladores no modo de desinstalação. |

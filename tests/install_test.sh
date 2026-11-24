@@ -156,6 +156,8 @@ test_install_adds_all_layers() {
         '[.hooks.UserPromptSubmit[].hooks[].command] | any(contains("inject.sh\" claude prompt"))'
     check "Claude compaction hook" json_has "$home/.claude/settings.json" \
         '.hooks.SessionStart | any(.matcher == "compact")'
+    check "Claude subagent usage hook" json_has "$home/.claude/settings.json" \
+        '.hooks.PostToolUse | any(.matcher == "Agent" and (.hooks | any(.command | contains("inject.sh\" claude subagent"))))'
     check "Claude status line installed" json_has "$home/.claude/settings.json" \
         '.statusLine.command | contains("claude-statusline.sh")'
     check "Claude status line refreshes every minute" json_has "$home/.claude/settings.json" \
@@ -219,6 +221,8 @@ test_reinstall_is_idempotent() {
     check "one block in Codex AGENTS.md" has_one_block "$home/.codex/AGENTS.md"
     check "one Claude prompt hook" json_has "$home/.claude/settings.json" \
         '[.hooks.UserPromptSubmit[].hooks[] | select(.command | contains("unlazier"))] | length == 1'
+    check "one Claude subagent usage hook" json_has "$home/.claude/settings.json" \
+        '[.hooks.PostToolUse[].hooks[] | select(.command | contains("unlazier"))] | length == 1'
     check "one Claude end-of-turn alert" has_alert_hook "$home/.claude/settings.json" Stop
     check "one Codex end-of-turn alert" has_alert_hook "$home/.codex/hooks.json" Stop
     check "one Codex prompt hook" json_has "$home/.codex/hooks.json" \
@@ -388,6 +392,9 @@ test_inject_usage_lines() {
 
     check "Claude usage line" test "$(last_line bash "$home/.claude/unlazier/inject.sh" claude prompt)" \
         = "Usage: 5h 24% | weekly unknown (source: Claude Code status line, 2 min old)"
+    check "Claude subagent context is only the usage line" json_has <(bash "$home/.claude/unlazier/inject.sh" claude subagent) \
+        '.hookSpecificOutput == {hookEventName: "PostToolUse",
+            additionalContext: "Usage: 5h 24% | weekly unknown (source: Claude Code status line, 2 min old)"}'
     check "Codex usage line" test "$(last_line bash "$home/.codex/unlazier/inject.sh" codex prompt)" \
         = "Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old)"
     check "Kiro usage unknown" test "$(last_line bash "$home/.kiro/unlazier/inject.sh" kiro prompt)" \
@@ -456,65 +463,6 @@ test_inject_project_rules() {
         ".hookSpecificOutput.additionalContext | contains(\"- Project rules: $wide/GEMINI.md apply (Gemini);\")"
 }
 
-# Writes a usage snapshot with one window; an empty resets_at leaves the field out.
-write_rate_limits() {
-    local home="$1" window="$2" used="$3" resets_at="${4:-null}"
-    mkdir -p "$home/.claude/state"
-    jq -n --arg window "$window" --argjson used "$used" --argjson resets_at "$resets_at" '
-        {($window): ({used_percentage: $used} + (if $resets_at == null then {} else {resets_at: $resets_at} end))}' \
-        > "$home/.claude/state/rate_limits.json"
-}
-
-exit_status() { "$@" >/dev/null 2>&1; echo $?; }
-
-test_wait_usage_exits() {
-    local home now script waiter
-    echo "wait-usage ends with one line per reason"
-    home="$(new_home)"
-    now="$(date +%s)"
-    run_installer "$home" --harness claude,codex >/dev/null 2>&1
-    script="$home/.claude/unlazier/wait-usage.sh"
-
-    check "script installed and executable for Claude Code" test -x "$script"
-    check "script not installed for Codex" file_absent "$home/.codex/unlazier/wait-usage.sh"
-    check "missing state file fails fast" test "$(exit_status bash "$script" --interval 1 --max-wait 10)" = "1"
-
-    write_rate_limits "$home" seven_day 30
-    check "missing window fails fast" test "$(exit_status bash "$script" --interval 1 --max-wait 10)" = "1"
-    check "unknown option is a usage error" test "$(exit_status bash "$script" --unknown)" = "2"
-    check "invalid number is a usage error" test "$(exit_status bash "$script" --stop-at ninety)" = "2"
-
-    write_rate_limits "$home" five_hour 24 "$((now - 120))"
-    check "passed reset time ends the wait" test "$(bash "$script" --interval 1 --max-wait 10 --grace 60)" \
-        = "reset used=24 start=24"
-
-    write_rate_limits "$home" five_hour 96
-    check "usage at the stop level ends the wait" test "$(bash "$script" --interval 1 --max-wait 10 --stop-at 95)" \
-        = "threshold used=96 stop_at=95"
-
-    write_rate_limits "$home" seven_day 99
-    check "weekly window can be watched" test \
-        "$(bash "$script" --interval 1 --max-wait 10 --window seven_day --stop-at 99)" = "threshold used=99 stop_at=99"
-
-    write_rate_limits "$home" five_hour 50
-    check "no reset time ends only by timeout" test "$(bash "$script" --interval 1 --max-wait 2)" = "timeout used=50"
-
-    cp "$home/.claude/state/rate_limits.json" "$home/other.json"
-    rm "$home/.claude/state/rate_limits.json"
-    check "state option replaces the default file" test \
-        "$(bash "$script" --interval 1 --max-wait 2 --state "$home/other.json")" = "timeout used=50"
-
-    write_rate_limits "$home" five_hour 50 "$((now + 3600))"
-    bash "$script" --interval 1 --max-wait 10 > "$home/waiter.out" 2>&1 &
-    waiter=$!
-    sleep 2
-    printf '{"five_hour": {"used_perc' > "$home/.claude/state/rate_limits.json"
-    sleep 2
-    write_rate_limits "$home" five_hour 10 "$((now + 3600))"
-    wait "$waiter"
-    check "usage drop ends the wait after a torn snapshot" test "$(cat "$home/waiter.out")" = "dropped used=10 start=50"
-}
-
 test_inject_output_formats() {
     local home
     echo "inject prints the shape each harness expects"
@@ -532,6 +480,26 @@ test_inject_output_formats() {
     check "Cline output is JSON" json_has <(bash "$home/Documents/Cline/unlazier/inject.sh" cline prompt) \
         '.contextModification | startswith("Unlazier rules")'
     check "unknown event fails" test "$(bash "$home/.claude/unlazier/inject.sh" claude other >/dev/null 2>&1; echo $?)" = "2"
+    check "subagent event fails outside Claude" \
+        test "$(bash "$home/.gemini/unlazier/inject.sh" gemini subagent >/dev/null 2>&1; echo $?)" = "2"
+}
+
+test_upgrade_removes_obsolete_payload() {
+    local home output
+    echo "install removes obsolete payload files"
+    home="$(new_home)"
+    mkdir -p "$home/.claude/unlazier"
+    printf 'old\n' > "$home/.claude/unlazier/wait-usage.sh"
+    printf 'old\n' > "$home/.claude/unlazier/wait-usage.ps1"
+    printf 'keep\n' > "$home/.claude/unlazier/other.txt"
+    output="$(run_installer "$home" --harness claude 2>&1)"
+
+    check "obsolete shell waiter removed" file_absent "$home/.claude/unlazier/wait-usage.sh"
+    check "obsolete PowerShell waiter removed" file_absent "$home/.claude/unlazier/wait-usage.ps1"
+    check "other files in the folder kept" test -f "$home/.claude/unlazier/other.txt"
+    check "open sessions told to restart" test -n "$(printf '%s' "$output" | grep 'restart sessions opened before')"
+    output="$(run_installer "$home" --harness claude 2>&1)"
+    check "no restart notice without waiters" test -z "$(printf '%s' "$output" | grep 'restart sessions opened before')"
 }
 
 test_statusline_saves_usage() {
@@ -567,8 +535,8 @@ main() {
     test_inject_usage_lines
     test_inject_output_formats
     test_inject_project_rules
+    test_upgrade_removes_obsolete_payload
     test_statusline_saves_usage
-    test_wait_usage_exits
     test_cline_question_alert_filters_tools
     echo
     echo "$PASSED passed, $FAILED failed"
