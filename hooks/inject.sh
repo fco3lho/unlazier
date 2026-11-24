@@ -36,22 +36,31 @@ SECTION_TITLES_PROGRAM='
 END { if (count > max) titles = titles ", ..."; print titles }
 '
 
-# Normalized usage reading: {"five_hour": <percent|null>, "weekly": <percent|null>, "captured_at": <epoch>}.
-# A window counts only while its reset time is still in the future.
+# Normalized usage reading: {"five_hour": <percent|null>, "weekly": <percent|null>, "captured_at": <epoch|null>}.
+# A window counts only while its reset time is still in the future. A field that is not a number
+# counts as missing, so a damaged reading becomes unknown usage instead of a jq error. The Claude
+# file is slurped so that anything but a single JSON object is rejected.
 # shellcheck disable=SC2016  # jq programs, not shell expansions
 CLAUDE_USAGE_PROGRAM='
-def live($window): if $window.used_percentage != null and (($window.resets_at // now + 1) > now)
-    then $window.used_percentage else null end;
-{five_hour: live(.five_hour // {}), weekly: live(.seven_day // {}), captured_at: .captured_at}
+def number: if type == "number" then . else null end;
+def live: if type != "object" then null
+    else (.used_percentage | number) as $percent
+        | if $percent != null and (((.resets_at | number) // now + 1) > now) then $percent else null end
+    end;
+if length == 1 and (.[0] | type) == "object" then
+    .[0] | {five_hour: (.five_hour | live), weekly: (.seven_day | live), captured_at: (.captured_at | number)}
+else error("the usage file is not one JSON object") end
 '
 
 # shellcheck disable=SC2016
 CODEX_USAGE_PROGRAM='
+def number: if type == "number" then . else null end;
 def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
 (.timestamp | epoch) as $captured_at
-| [.payload.rate_limits.primary, .payload.rate_limits.secondary] | map(select(. != null))
-| map(. + {resets_epoch: (.resets_at // (if .resets_in_seconds != null then $captured_at + .resets_in_seconds else null end))})
-| def pick($minutes): (map(select(.window_minutes == $minutes and .used_percent != null
+| [.payload.rate_limits.primary, .payload.rate_limits.secondary] | map(objects)
+| map(. + {resets_epoch: ((.resets_at | number)
+    // (if (.resets_in_seconds | number) != null then $captured_at + .resets_in_seconds else null end))})
+| def pick($minutes): (map(select(.window_minutes == $minutes and (.used_percent | number) != null
         and ((.resets_epoch // now + 1) > now))) | first | .used_percent) // null;
 {five_hour: pick(300), weekly: pick(10080), captured_at: $captured_at}
 '
@@ -83,7 +92,7 @@ else empty end
 read_claude_usage() {
     local state_file="$HARNESS_HOME/state/rate_limits.json"
     [ -f "$state_file" ] || return 1
-    jq -c "$CLAUDE_USAGE_PROGRAM" "$state_file" 2>/dev/null
+    jq -cs "$CLAUDE_USAGE_PROGRAM" "$state_file" 2>/dev/null
 }
 
 read_codex_usage() {
@@ -123,8 +132,9 @@ usage_line() {
         echo "Usage: unknown (no usage reading available)"
         return 0
     fi
+    # A failing usage line would make Claude Code block the prompt, so usage data never fails the hook.
     printf '%s' "$reading" | jq -r --arg source "$source" --argjson max_age "$MAX_READING_AGE_SECONDS" \
-        "$FORMAT_USAGE_PROGRAM"
+        "$FORMAT_USAGE_PROGRAM" 2>/dev/null || echo "Usage: unknown (no usage reading available)"
 }
 
 # A missing or unreadable reading allows the subagent: the gate never blocks on unknown usage.

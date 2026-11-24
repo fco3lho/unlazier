@@ -84,13 +84,14 @@ function Test-Number {
     return ($Value -is [int]) -or ($Value -is [long]) -or ($Value -is [double]) -or ($Value -is [decimal])
 }
 
-# A window counts only while its reset time is still in the future.
+# A window counts only while its reset time is still in the future; a reset time that is not a
+# number counts as missing, as in inject.sh.
 function Get-LivePercent {
     param($Percent, $ResetsAt, [double]$Now)
     if (-not (Test-Number $Percent)) {
         return $null
     }
-    if ($null -eq $ResetsAt) {
+    if (-not (Test-Number $ResetsAt)) {
         $ResetsAt = $Now + 1
     }
     if ([double]$ResetsAt -gt $Now) {
@@ -105,7 +106,13 @@ function Read-ClaudeUsage {
     if (-not (Test-Path -LiteralPath $stateFile -PathType Leaf)) {
         return $null
     }
-    $state = (Read-SharedText $stateFile) | ConvertFrom-Json
+    $text = Read-SharedText $stateFile
+    # Only a single JSON object is a reading, as in inject.sh. PowerShell 7 unwraps a one-element
+    # array into its element, so the text tells an object from an array.
+    if ($text -notmatch '^[ \t\r\n]*\{') {
+        return $null
+    }
+    $state = $text | ConvertFrom-Json
     $fiveHour = Get-JsonProperty $state 'five_hour'
     $sevenDay = Get-JsonProperty $state 'seven_day'
     $capturedAt = Get-JsonProperty $state 'captured_at'

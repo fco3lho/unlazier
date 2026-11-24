@@ -96,7 +96,8 @@ function Invoke-TestScript {
         $output = & $PowerShellPath @commandLine 2>&1
     }
     return [pscustomobject]@{
-        Lines = [string[]]@($output | ForEach-Object { "$_" })
+        # Standard error stays out: a hook may log a cause there while its output stays the same.
+        Lines = [string[]]@($output | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" })
         ExitCode = $LASTEXITCODE
     }
 }
@@ -805,6 +806,73 @@ function Test-InjectUsageLines {
     }
 }
 
+# A damaged reading must degrade to the expected usage line: the prompt keeps its reminder and
+# exits 0, the subagent event still reports usage, and the gate allows the call.
+function Assert-DegradedUsage {
+    param([string]$TestHome, [string]$PayloadDirectory, [string]$Harness, [string]$Description, [string]$Expected)
+    $prompt = Invoke-Inject $TestHome $PayloadDirectory $Harness 'prompt'
+    Assert-That "${Description}: the prompt exits 0 with the reminder" {
+        $prompt.ExitCode -eq 0 -and $prompt.Lines[0] -eq 'Unlazier rules are active for this session.'
+    }
+    Assert-That "${Description}: usage line" { (Get-LastLine $prompt) -eq $Expected }
+    Assert-That "${Description}: the subagent event reports it" {
+        (ConvertFrom-OutputJson (Invoke-Inject $TestHome $PayloadDirectory $Harness 'subagent')).hookSpecificOutput.additionalContext -eq $Expected
+    }
+    Assert-That "${Description}: the gate allows silently" {
+        $result = Invoke-Inject $TestHome $PayloadDirectory $Harness 'dispatch'
+        $result.ExitCode -eq 0 -and @($result.Lines | Where-Object { $_ -ne '' }).Count -eq 0
+    }
+}
+
+function Test-InjectMalformedUsage {
+    Write-Host 'a malformed usage reading never blocks the hook'
+    $testHome = New-TestHome
+    $now = Get-UnixNow
+    [void](Invoke-Installer $testHome @('-Harness', 'claude,codex'))
+    $stateFile = Join-TestPath $testHome '.claude/state/rate_limits.json'
+
+    Write-TestJson $stateFile ([pscustomobject]@{
+        captured_at = 'oops'
+        five_hour = [pscustomobject]@{ used_percentage = 40; resets_at = $now + 3600 }
+    })
+    Assert-DegradedUsage $testHome '.claude' 'claude' 'captured_at as a string' 'Usage: unknown (no usage reading from the last 15 minutes)'
+    Assert-That 'captured_at as a string: compaction exits 0 with the principles' {
+        $result = Invoke-Inject $testHome '.claude' 'claude' 'compact'
+        $result.ExitCode -eq 0 -and $result.Lines[0] -eq '# Global Agent Rules'
+    }
+    Write-TestJson $stateFile ([pscustomobject]@{
+        captured_at = $now
+        five_hour = [pscustomobject]@{ used_percentage = '40'; resets_at = $now + 3600 }
+        seven_day = [pscustomobject]@{ used_percentage = 61.2; resets_at = 'oops' }
+    })
+    Assert-DegradedUsage $testHome '.claude' 'claude' 'percentages and reset times as strings' `
+        'Usage: 5h unknown | weekly 61% (source: Claude Code status line, 0 min old)'
+    Write-TestJson $stateFile @([pscustomobject]@{
+        captured_at = $now
+        five_hour = [pscustomobject]@{ used_percentage = 40; resets_at = $now + 3600 }
+    })
+    Assert-DegradedUsage $testHome '.claude' 'claude' 'a JSON array' 'Usage: unknown (no usage reading available)'
+    Write-TestFile $stateFile "{`"captured_at`":$now,"
+    Assert-DegradedUsage $testHome '.claude' 'claude' 'invalid JSON' 'Usage: unknown (no usage reading available)'
+    Write-TestFile $stateFile ''
+    Assert-DegradedUsage $testHome '.claude' 'claude' 'an empty file' 'Usage: unknown (no usage reading available)'
+    Write-TestFile $stateFile "{`"captured_at`":$now}`n{`"captured_at`":$now}`n"
+    Assert-DegradedUsage $testHome '.claude' 'claude' 'two JSON documents' 'Usage: unknown (no usage reading available)'
+
+    $reading = [pscustomobject]@{
+        timestamp = [System.DateTimeOffset]::FromUnixTimeSeconds($now - 60).UtcDateTime.ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
+        type = 'event_msg'
+        payload = [pscustomobject]@{ type = 'token_count'; rate_limits = [pscustomobject]@{
+            primary = [pscustomobject]@{ used_percent = '40'; window_minutes = 300; resets_at = 'oops' }
+            secondary = [pscustomobject]@{ used_percent = 61.2; window_minutes = 10080; resets_at = 'oops'; resets_in_seconds = 'soon' } } }
+    }
+    Write-TestFile (Join-TestPath $testHome '.codex/sessions/2026/11/14/rollout-2026-11-14T10-00-00-b.jsonl') (
+        (ConvertTo-Json -InputObject $reading -Depth 10 -Compress) + "`n")
+    Assert-DegradedUsage $testHome '.codex' 'codex' 'Codex percentages and reset times as strings' `
+        'Usage: 5h unknown | weekly 61% (source: Codex session log, 1 min old)'
+}
+
 function ConvertFrom-OutputJson {
     param($Result)
     return (($Result.Lines -join "`n") | ConvertFrom-Json)
@@ -1095,6 +1163,7 @@ try {
     Test-InvalidJsonLeftUntouched
     Test-DeepConfigKept
     Test-InjectUsageLines
+    Test-InjectMalformedUsage
     Test-InjectOutputFormats
     Test-InjectProjectRules
     Test-InjectDispatchGate

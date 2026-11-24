@@ -573,6 +573,61 @@ test_inject_usage_lines() {
         = "Usage: unknown (no usage reading from the last 15 minutes)"
 }
 
+# A damaged reading must degrade to the expected usage line: the prompt keeps its reminder and
+# exits 0, the subagent event still reports usage, and the gate allows the call.
+check_degraded_usage() {
+    local home="$1" folder="$2" harness="$3" description="$4" expected="$5" inject output status
+    inject="$home/$folder/unlazier/inject.sh"
+    output="$(bash "$inject" "$harness" prompt 2>/dev/null)"
+    status=$?
+    check "$description: the prompt exits 0 with the reminder" \
+        test "$status $(printf '%s\n' "$output" | head -n 1)" = "0 Unlazier rules are active for this session."
+    check "$description: usage line" test "$(printf '%s\n' "$output" | tail -n 1)" = "$expected"
+    check "$description: the subagent event reports it" \
+        json_has <(bash "$inject" "$harness" subagent </dev/null 2>/dev/null) ".hookSpecificOutput.additionalContext == \"$expected\""
+    check "$description: the gate allows silently" \
+        test "$(bash "$inject" "$harness" dispatch 2>/dev/null; echo "exit $?")" = "exit 0"
+}
+
+test_inject_malformed_usage() {
+    local home now state_file output status
+    echo "a malformed usage reading never blocks the hook"
+    home="$(new_home)"
+    now="$(date +%s)"
+    run_installer "$home" --harness claude,codex >/dev/null 2>&1
+    mkdir -p "$home/.claude/state"
+    state_file="$home/.claude/state/rate_limits.json"
+
+    printf '{"captured_at":"oops","five_hour":{"used_percentage":40,"resets_at":%s}}\n' "$((now + 3600))" > "$state_file"
+    check_degraded_usage "$home" .claude claude "captured_at as a string" \
+        "Usage: unknown (no usage reading from the last 15 minutes)"
+    output="$(bash "$home/.claude/unlazier/inject.sh" claude compact 2>/dev/null)"
+    status=$?
+    check "captured_at as a string: compaction exits 0 with the principles" \
+        test "$status $(printf '%s\n' "$output" | head -n 1)" = "0 # Global Agent Rules"
+    printf '{"captured_at":%s,"five_hour":{"used_percentage":"40","resets_at":%s},%s}\n' "$now" "$((now + 3600))" \
+        '"seven_day":{"used_percentage":61.2,"resets_at":"oops"}' > "$state_file"
+    check_degraded_usage "$home" .claude claude "percentages and reset times as strings" \
+        "Usage: 5h unknown | weekly 61% (source: Claude Code status line, 0 min old)"
+    printf '[{"captured_at":%s,"five_hour":{"used_percentage":40,"resets_at":%s}}]\n' "$now" "$((now + 3600))" > "$state_file"
+    check_degraded_usage "$home" .claude claude "a JSON array" "Usage: unknown (no usage reading available)"
+    printf '{"captured_at":%s,' "$now" > "$state_file"
+    check_degraded_usage "$home" .claude claude "invalid JSON" "Usage: unknown (no usage reading available)"
+    : > "$state_file"
+    check_degraded_usage "$home" .claude claude "an empty file" "Usage: unknown (no usage reading available)"
+    printf '{"captured_at":%s}\n{"captured_at":%s}\n' "$now" "$now" > "$state_file"
+    check_degraded_usage "$home" .claude claude "two JSON documents" "Usage: unknown (no usage reading available)"
+
+    mkdir -p "$home/.codex/sessions/2026/11/14"
+    jq -cn --arg timestamp "$(jq -rn --argjson epoch "$((now - 60))" '$epoch | todate')" '
+        {timestamp: $timestamp, type: "event_msg", payload: {type: "token_count", rate_limits: {
+            primary: {used_percent: "40", window_minutes: 300, resets_at: "oops"},
+            secondary: {used_percent: 61.2, window_minutes: 10080, resets_at: "oops", resets_in_seconds: "soon"}}}}' \
+        > "$home/.codex/sessions/2026/11/14/rollout-2026-11-14T10-00-00-b.jsonl"
+    check_degraded_usage "$home" .codex codex "Codex percentages and reset times as strings" \
+        "Usage: 5h unknown | weekly 61% (source: Codex session log, 1 min old)"
+}
+
 # Runs inject.sh for the harness from the given directory, as the harness does from the project.
 inject_from() {
     local home="$1" folder="$2" harness="$3" event="$4" directory="$5"
@@ -786,6 +841,7 @@ main() {
     test_deep_config_kept
     test_missing_jq_installs_rules_only
     test_inject_usage_lines
+    test_inject_malformed_usage
     test_inject_output_formats
     test_inject_project_rules
     test_inject_dispatch_gate
