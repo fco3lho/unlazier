@@ -925,6 +925,25 @@ function Test-StatusLineSavesUsage {
     Assert-That 'broken input degrades' { (Get-LastLine (Invoke-TestScript $testHome $statusLineScript @() 'garbage')) -eq 'Usage: no data' }
 }
 
+function Test-StatusLineTemporaryFileUnpredictable {
+    Write-Host 'the status line leaves a file at a guessable temporary name alone'
+    $testHome = New-TestHome
+    [void](Invoke-Installer $testHome @('-Harness', 'claude'))
+    $stateFolder = Join-TestPath $testHome '.claude/state'
+    $planted = Join-TestPath $stateFolder 'rate_limits.json.tmp'
+    Write-TestFile $planted "planted`n"
+    $statusLineScript = Join-TestPath $testHome '.claude/unlazier/claude-statusline.ps1'
+    [void](Invoke-TestScript $testHome $statusLineScript @() '{"rate_limits":{"five_hour":{"used_percentage":24}}}')
+
+    Assert-That 'planted file unchanged' {
+        (Test-Path -LiteralPath $planted -PathType Leaf) -and [System.IO.File]::ReadAllText($planted) -eq "planted`n"
+    }
+    Assert-That 'usage saved' {
+        (Read-TestJson (Join-TestPath $stateFolder 'rate_limits.json')).five_hour.used_percentage -eq 24
+    }
+    Assert-That 'no temporary files left' { @(Get-ChildItem -LiteralPath $stateFolder -File -Force).Count -eq 2 }
+}
+
 $originalEnvironment = @{}
 foreach ($name in $IsolatedVariables) {
     $originalEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
@@ -947,6 +966,7 @@ try {
     Test-AutoContinueNotice
     Test-UpgradeRemovesObsoletePayload
     Test-StatusLineSavesUsage
+    Test-StatusLineTemporaryFileUnpredictable
 } finally {
     foreach ($name in $IsolatedVariables) {
         [Environment]::SetEnvironmentVariable($name, $originalEnvironment[$name])

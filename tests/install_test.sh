@@ -644,6 +644,21 @@ test_statusline_saves_usage() {
         = "Usage: no data"
 }
 
+test_statusline_temporary_file_unpredictable() {
+    local home state_folder
+    echo "the status line leaves a file at a guessable temporary name alone"
+    home="$(new_home)"
+    run_installer "$home" --harness claude >/dev/null 2>&1
+    state_folder="$home/.claude/state"
+    mkdir -p "$state_folder"
+    printf 'planted\n' > "$state_folder/rate_limits.json.tmp"
+    jq -cn '{rate_limits: {five_hour: {used_percentage: 24}}}' | bash "$home/.claude/unlazier/claude-statusline.sh" >/dev/null
+
+    check "planted file unchanged" test "$(cat "$state_folder/rate_limits.json.tmp" 2>/dev/null)" = "planted"
+    check "usage saved" json_has "$state_folder/rate_limits.json" '.five_hour.used_percentage == 24'
+    check "no temporary files left" test "$(find "$state_folder" -type f | wc -l | tr -d ' ')" = "2"
+}
+
 main() {
     command -v jq >/dev/null 2>&1 || { echo "jq is required to run these tests" >&2; exit 1; }
     test_install_preserves_user_content
@@ -664,6 +679,7 @@ main() {
     test_auto_continue_notice
     test_upgrade_removes_obsolete_payload
     test_statusline_saves_usage
+    test_statusline_temporary_file_unpredictable
     test_cline_question_alert_filters_tools
     echo
     echo "$PASSED passed, $FAILED failed"
