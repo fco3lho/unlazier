@@ -12,6 +12,12 @@ AI coding assistants are powerful, but they often cut corners. They guess what y
 
 Unlazier is a set of rules that makes these assistants work more carefully. You install it once, and every AI coding tool you use follows the same rules in every project.
 
+- **One install, nine tools:** Claude Code, Codex CLI, Gemini CLI, Devin, Kiro, Cline, OpenCode, Amp, and GitHub Copilot CLI, on Linux, macOS, and Windows.
+- **Rules that stay in force:** in every tool that allows it, a short reminder repeats them with each message, so long sessions do not drift.
+- **Paced by your usage limits:** the assistant works in parallel when there is room and slows down near your 5-hour and weekly limits. In Claude Code and Codex CLI, a hook blocks new helper agents when usage is high.
+- **Sound alerts:** three beeps when the assistant needs you or finishes its turn.
+- **Safe to try:** it adds to your settings instead of replacing them, and the uninstaller removes only what it added.
+
 ## Table of Contents
 
 - [What You Get](#what-you-get)

@@ -14,6 +14,12 @@ Assistentes de IA para programação são poderosos, mas costumam pegar atalhos.
 
 O Unlazier é um conjunto de regras que faz esses assistentes trabalharem com mais cuidado. Você instala uma vez, e todas as ferramentas de IA para programação que você usa passam a seguir as mesmas regras em todos os projetos.
 
+- **Uma instalação, nove ferramentas:** Claude Code, Codex CLI, Gemini CLI, Devin, Kiro, Cline, OpenCode, Amp e GitHub Copilot CLI, no Linux, no macOS e no Windows.
+- **Regras que continuam valendo:** em toda ferramenta que permite, um lembrete curto as repete a cada mensagem, para que sessões longas não se desviem.
+- **Ritmo de acordo com os seus limites de uso:** o assistente trabalha em paralelo quando há folga e desacelera perto dos limites de 5 horas e semanal. No Claude Code e no Codex CLI, um hook bloqueia novos agentes auxiliares quando o uso está alto.
+- **Alertas sonoros:** três bipes quando o assistente precisa de você ou termina a vez dele.
+- **Seguro para testar:** ele acrescenta às suas configurações em vez de substituí-las, e o desinstalador remove só o que adicionou.
+
 ## Índice
 
 - [O que você ganha](#o-que-você-ganha)
