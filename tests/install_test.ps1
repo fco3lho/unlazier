@@ -98,6 +98,7 @@ function Invoke-TestScript {
     return [pscustomobject]@{
         # Standard error stays out: a hook may log a cause there while its output stays the same.
         Lines = [string[]]@($output | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" })
+        Errors = [string[]]@($output | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" })
         ExitCode = $LASTEXITCODE
     }
 }
@@ -697,7 +698,7 @@ function Test-UnsafeHomeRefused {
     Assert-That 'install fails' { $result.ExitCode -ne 0 }
     # The error view may wrap long lines, so the output is compared without white space.
     Assert-That 'the error names the path' {
-        $output = ($result.Lines -join '') -replace '\s', ''
+        $output = ((@($result.Lines) + @($result.Errors)) -join '') -replace '\s', ''
         $output.Contains('cannotcarrysafely') -and $output.Contains(((Join-TestPath $unsafeHome '.claude') -replace '\s', ''))
     }
     Assert-That 'nothing written' { -not (Test-Path -LiteralPath (Join-TestPath $unsafeHome '.claude')) }
