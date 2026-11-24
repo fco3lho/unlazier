@@ -534,6 +534,8 @@ install_payload() {
     mkdir -p "$target"
     cp "$SOURCE_DIR/AGENTS.md" "$SOURCE_DIR/reminder.md" "$SOURCE_DIR/hooks/inject.sh" "$SOURCE_DIR/hooks/alert.sh" "$target/"
     chmod +x "$target/inject.sh" "$target/alert.sh"
+    # Earlier versions installed background waiters here; no current rule calls them.
+    rm -f "$target/wait-usage.sh" "$target/wait-usage.ps1"
 }
 
 remove_payload() {

@@ -834,6 +834,13 @@ param(
             $source = [System.IO.Path]::Combine($State.SourceDirectory, $relativePath)
             Copy-Item -LiteralPath $source -Destination ([System.IO.Path]::Combine($target, (Split-Path -Leaf $relativePath))) -Force
         }
+        # Earlier versions installed background waiters here; no current rule calls them.
+        foreach ($obsolete in @('wait-usage.sh', 'wait-usage.ps1')) {
+            $obsoletePath = [System.IO.Path]::Combine($target, $obsolete)
+            if (Test-Path -LiteralPath $obsoletePath -PathType Leaf) {
+                Remove-Item -LiteralPath $obsoletePath -Force
+            }
+        }
     }
 
     function Remove-Payload {

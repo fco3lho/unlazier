@@ -475,6 +475,20 @@ test_inject_output_formats() {
     check "unknown event fails" test "$(bash "$home/.claude/unlazier/inject.sh" claude other >/dev/null 2>&1; echo $?)" = "2"
 }
 
+test_upgrade_removes_obsolete_payload() {
+    local home
+    echo "install removes obsolete payload files"
+    home="$(new_home)"
+    mkdir -p "$home/.claude/unlazier"
+    printf 'old\n' > "$home/.claude/unlazier/wait-usage.sh"
+    printf 'old\n' > "$home/.claude/unlazier/wait-usage.ps1"
+    run_installer "$home" --harness claude >/dev/null 2>&1
+
+    check "obsolete shell waiter removed" file_absent "$home/.claude/unlazier/wait-usage.sh"
+    check "obsolete PowerShell waiter removed" file_absent "$home/.claude/unlazier/wait-usage.ps1"
+    check "current payload kept" test -x "$home/.claude/unlazier/inject.sh"
+}
+
 test_statusline_saves_usage() {
     local home now output
     echo "Claude status line shows and saves usage"
@@ -508,6 +522,7 @@ main() {
     test_inject_usage_lines
     test_inject_output_formats
     test_inject_project_rules
+    test_upgrade_removes_obsolete_payload
     test_statusline_saves_usage
     test_cline_question_alert_filters_tools
     echo

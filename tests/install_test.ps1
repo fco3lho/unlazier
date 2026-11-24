@@ -652,6 +652,26 @@ function Test-InjectProjectRules {
     }
 }
 
+function Test-UpgradeRemovesObsoletePayload {
+    Write-Host 'install removes obsolete payload files'
+    $testHome = New-TestHome
+    $payload = Join-TestPath $testHome '.claude/unlazier'
+    [void][System.IO.Directory]::CreateDirectory($payload)
+    Write-TestFile (Join-TestPath $payload 'wait-usage.sh') 'old'
+    Write-TestFile (Join-TestPath $payload 'wait-usage.ps1') 'old'
+    [void](Invoke-Installer $testHome @('-Harness', 'claude'))
+
+    Assert-That 'obsolete shell waiter removed' {
+        -not (Test-Path -LiteralPath (Join-TestPath $payload 'wait-usage.sh'))
+    }
+    Assert-That 'obsolete PowerShell waiter removed' {
+        -not (Test-Path -LiteralPath (Join-TestPath $payload 'wait-usage.ps1'))
+    }
+    Assert-That 'current payload kept' {
+        Test-Path -LiteralPath (Join-TestPath $payload 'inject.ps1') -PathType Leaf
+    }
+}
+
 function Test-StatusLineSavesUsage {
     Write-Host 'Claude status line shows and saves usage'
     $testHome = New-TestHome
@@ -688,6 +708,7 @@ try {
     Test-InjectUsageLines
     Test-InjectOutputFormats
     Test-InjectProjectRules
+    Test-UpgradeRemovesObsoletePayload
     Test-StatusLineSavesUsage
 } finally {
     foreach ($name in $IsolatedVariables) {
