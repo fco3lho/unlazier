@@ -443,6 +443,57 @@ function Test-UninstallRestoresOriginalFiles {
     }
 }
 
+function Test-IsSymbolicLink {
+    param([string]$Path)
+    return (Get-Item -LiteralPath $Path -Force).LinkType -eq 'SymbolicLink'
+}
+
+# Dotfiles managers keep these configs elsewhere and link them; settings may hold secrets.
+# File modes exist only outside Windows.
+function Test-ConfigFilesRewrittenInPlace {
+    Write-Host 'config files keep their mode and symbolic links'
+    $testHome = New-TestHome
+    $dotfiles = Join-TestPath $testHome 'dotfiles'
+    $settingsPath = Join-TestPath $testHome '.claude/settings.json'
+    $hooksLink = Join-TestPath $testHome '.codex/hooks.json'
+    $agentsLink = Join-TestPath $testHome '.codex/AGENTS.md'
+    $userHooks = [pscustomobject]@{ hooks = [pscustomobject]@{ Stop = [object[]]@([pscustomobject]@{
+        hooks = [object[]]@([pscustomobject]@{ type = 'command'; command = 'beep' }) }) } }
+    Write-TestJson $settingsPath ([pscustomobject]@{ model = 'opus' })
+    Write-TestJson (Join-TestPath $dotfiles 'hooks.json') $userHooks
+    Write-TestFile (Join-TestPath $dotfiles 'AGENTS.md') "# Codex notes`n"
+    [void][System.IO.Directory]::CreateDirectory((Join-TestPath $testHome '.codex'))
+    [void](New-Item -ItemType SymbolicLink -Path $hooksLink -Target (Join-TestPath $dotfiles 'hooks.json'))
+    [void](New-Item -ItemType SymbolicLink -Path $agentsLink -Target (Join-TestPath $dotfiles 'AGENTS.md'))
+    $isUnix = [System.IO.Path]::DirectorySeparatorChar -eq '/'
+    if ($isUnix) {
+        & chmod 600 $settingsPath
+    }
+    # The second run replaces the rules block instead of appending it.
+    [void](Invoke-Installer $testHome @('-Harness', 'claude,codex'))
+    [void](Invoke-Installer $testHome @('-Harness', 'claude,codex'))
+
+    if ($isUnix) {
+        Assert-That 'settings.json stays private' { (Get-Item -LiteralPath $settingsPath).UnixMode -eq '-rw-------' }
+    }
+    Assert-That 'hooks.json stays a link' { Test-IsSymbolicLink $hooksLink }
+    Assert-That 'the linked hooks.json gets the hooks' {
+        @(Get-HookCommands (Read-TestJson (Join-TestPath $dotfiles 'hooks.json')) 'UserPromptSubmit').Count -eq 1
+    }
+    Assert-That 'AGENTS.md stays a link' { Test-IsSymbolicLink $agentsLink }
+    Assert-That 'the linked AGENTS.md gets one block' { (Get-BlockCount (Join-TestPath $dotfiles 'AGENTS.md')) -eq 1 }
+    [void](Invoke-Uninstaller $testHome @('-Harness', 'codex'))
+    Assert-That 'uninstall keeps the hooks.json link' { Test-IsSymbolicLink $hooksLink }
+    Assert-That "uninstall leaves the user's hook in the linked file" {
+        (ConvertTo-Json -InputObject (Read-TestJson (Join-TestPath $dotfiles 'hooks.json')) -Depth 20 -Compress) -eq
+            (ConvertTo-Json -InputObject $userHooks -Depth 20 -Compress)
+    }
+    Assert-That 'uninstall keeps the AGENTS.md link' { Test-IsSymbolicLink $agentsLink }
+    Assert-That 'uninstall removes the block from the linked file' {
+        [System.IO.File]::ReadAllText((Join-TestPath $dotfiles 'AGENTS.md')) -eq "# Codex notes`n"
+    }
+}
+
 function Initialize-V1Installation {
     param([string]$TestHome)
     $v1 = [System.IO.Path]::Combine($FixturesDirectory, 'v1')
@@ -884,6 +935,7 @@ try {
     Test-HookCommandsUseFullPowerShellPath
     Test-ReinstallIsIdempotent
     Test-UninstallRestoresOriginalFiles
+    Test-ConfigFilesRewrittenInPlace
     Test-V1LeftoversRemovedWithYes
     Test-V1LeftoversKeptWithoutConfirmation
     Test-UpgradeFromV20Layout

@@ -74,6 +74,7 @@ has_one_block() { [ "$(block_count "$1")" = "1" ]; }
 contains_line() { grep -qxF "$2" "$1"; }
 json_has() { [ "$(jq -r "$2" "$1")" = "true" ]; }
 file_absent() { [ ! -e "$1" ]; }
+has_mode() { [ -n "$(find "$1" -perm "$2")" ]; }
 
 # True when the hook config has exactly one Unlazier alert for the event (and matcher).
 has_alert_hook() {
@@ -252,6 +253,49 @@ test_uninstall_restores_original_files() {
     after="$(snapshot "$home")"
 
     check "files identical to the original" test "$before" = "$after"
+}
+
+# Dotfiles managers keep these configs elsewhere and link them; settings may hold secrets.
+test_config_files_rewritten_in_place() {
+    local home dotfiles
+    echo "config files keep their mode and symbolic links"
+    home="$(new_home)"
+    dotfiles="$home/dotfiles"
+    mkdir -p "$home/.claude" "$home/.codex" "$dotfiles"
+    jq -n '{model: "opus"}' > "$home/.claude/settings.json"
+    chmod 600 "$home/.claude/settings.json"
+    jq -n '{hooks: {Stop: [{hooks: [{type: "command", command: "beep"}]}]}}' > "$dotfiles/hooks.json"
+    printf '# Codex notes\n' > "$dotfiles/AGENTS.md"
+    ln -s "$dotfiles/hooks.json" "$home/.codex/hooks.json"
+    ln -s "$dotfiles/AGENTS.md" "$home/.codex/AGENTS.md"
+    # The second run replaces the rules block instead of appending it.
+    run_installer "$home" --harness claude,codex >/dev/null 2>&1
+    run_installer "$home" --harness claude,codex >/dev/null 2>&1
+
+    check "settings.json stays private" has_mode "$home/.claude/settings.json" 600
+    check "hooks.json stays a link" test -L "$home/.codex/hooks.json"
+    check "the linked hooks.json gets the hooks" json_has "$dotfiles/hooks.json" '.hooks.UserPromptSubmit | length == 1'
+    check "AGENTS.md stays a link" test -L "$home/.codex/AGENTS.md"
+    check "the linked AGENTS.md gets one block" has_one_block "$dotfiles/AGENTS.md"
+    run_uninstaller "$home" --harness codex >/dev/null 2>&1
+    check "uninstall keeps the hooks.json link" test -L "$home/.codex/hooks.json"
+    check "uninstall leaves the user's hook in the linked file" json_has "$dotfiles/hooks.json" \
+        '. == {hooks: {Stop: [{hooks: [{type: "command", command: "beep"}]}]}}'
+    check "uninstall keeps the AGENTS.md link" test -L "$home/.codex/AGENTS.md"
+    check "uninstall removes the block from the linked file" test "$(cat "$dotfiles/AGENTS.md")" = "# Codex notes"
+}
+
+test_temporary_file_names_unpredictable() {
+    local home
+    echo "a file at a guessable temporary name is left alone"
+    home="$(new_home)"
+    mkdir -p "$home/.claude"
+    printf 'planted\n' > "$home/.claude/settings.json.unlazier.tmp"
+    run_installer "$home" --harness claude >/dev/null 2>&1
+
+    check "planted file unchanged" test "$(cat "$home/.claude/settings.json.unlazier.tmp" 2>/dev/null)" = "planted"
+    check "settings.json written" json_has "$home/.claude/settings.json" '.hooks.UserPromptSubmit | length == 1'
+    check "no temporary files left" test -z "$(find "$home/.claude" -name '.unlazier.*')"
 }
 
 seed_v1_installation() {
@@ -606,6 +650,8 @@ main() {
     test_install_adds_all_layers
     test_reinstall_is_idempotent
     test_uninstall_restores_original_files
+    test_config_files_rewritten_in_place
+    test_temporary_file_names_unpredictable
     test_v1_leftovers_removed_with_yes
     test_v1_leftovers_kept_without_confirmation
     test_upgrade_from_v2_0_layout

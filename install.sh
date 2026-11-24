@@ -177,12 +177,34 @@ def remove_ours:
     else . end;
 '
 
+# Replaces the file's content with the output of a command, which may read the file. The output
+# goes to a private temporary file first, so a failing command leaves the file as it was; it is
+# then copied into the file rather than moved over it, so the file keeps its mode, owner, and
+# symbolic link (dotfiles managers link these configs).
+rewrite_file() {
+    local file="$1" temporary_file
+    shift
+    temporary_file="$(mktemp "$(dirname "$file")/.unlazier.XXXXXX")" || return 1
+    if "$@" > "$temporary_file" && cat "$temporary_file" > "$file"; then
+        rm -f "$temporary_file"
+        return 0
+    fi
+    rm -f "$temporary_file"
+    return 1
+}
+
+jq_on_text() {
+    local text="$1"
+    shift
+    printf '%s' "$text" | jq "$@"
+}
+
 # Applies a jq program to a JSON config file in place. A missing file starts as {}; an
 # unreadable one is left untouched so a hand-edited config is never damaged.
 update_json_file() {
     local file="$1" program="$2"
     shift 2
-    local input="{}" temporary_file
+    local input="{}"
     if [ -f "$file" ]; then
         if ! jq empty "$file" >/dev/null 2>&1; then
             warn "$file is not valid JSON; skipped. Add the Unlazier hook by hand (see README)."
@@ -193,14 +215,11 @@ update_json_file() {
         [ -n "$(printf '%s' "$input" | tr -d '[:space:]')" ] || input="{}"
     fi
     mkdir -p "$(dirname "$file")"
-    temporary_file="$file.unlazier.tmp"
     # Explicit checks: callers run this inside conditions, where errexit does not apply.
-    if ! printf '%s' "$input" | jq "$@" "$JQ_HOOK_HELPERS $program" > "$temporary_file"; then
-        rm -f "$temporary_file"
+    if ! rewrite_file "$file" jq_on_text "$input" "$@" "$JQ_HOOK_HELPERS $program"; then
         warn "could not update $file; it was left unchanged."
         return 1
     fi
-    mv "$temporary_file" "$file"
 }
 
 # Removes our entries; deletes the file if nothing else remains in it. A file without our
@@ -429,7 +448,7 @@ render_rules() {
 
 # Replaces the block between the markers, or appends it when the file has none.
 write_block() {
-    local file="$1" block_file temporary_file
+    local file="$1" block_file
     mkdir -p "$(dirname "$file")"
     block_file="$(mktemp)"
     {
@@ -439,13 +458,11 @@ write_block() {
     } > "$block_file"
 
     if [ -f "$file" ] && grep -qxF "$MARKER_START" "$file"; then
-        temporary_file="$file.unlazier.tmp"
-        awk -v start="$MARKER_START" -v end="$MARKER_END" -v block="$block_file" '
+        rewrite_file "$file" awk -v start="$MARKER_START" -v end="$MARKER_END" -v block="$block_file" '
             $0 == start { while ((getline line < block) > 0) print line; skipping = 1; next }
             skipping && $0 == end { skipping = 0; next }
             !skipping { print }
-        ' "$file" > "$temporary_file" || { rm -f "$temporary_file" "$block_file"; die "could not update $file"; }
-        mv "$temporary_file" "$file"
+        ' "$file" || { rm -f "$block_file"; die "could not update $file"; }
     else
         # A file without a final newline would glue the marker to its last line.
         if [ -s "$file" ] && [ -n "$(tail -c 1 "$file")" ]; then
@@ -459,15 +476,13 @@ write_block() {
 # Removes the block (marked with the current markers unless others are given); deletes the
 # file when only whitespace is left.
 remove_block() {
-    local file="$1" start="${2:-$MARKER_START}" end="${3:-$MARKER_END}" temporary_file
+    local file="$1" start="${2:-$MARKER_START}" end="${3:-$MARKER_END}"
     [ -f "$file" ] && grep -qxF "$start" "$file" || return 0
-    temporary_file="$file.unlazier.tmp"
-    awk -v start="$start" -v end="$end" '
+    rewrite_file "$file" awk -v start="$start" -v end="$end" '
         $0 == start { skipping = 1; next }
         skipping && $0 == end { skipping = 0; next }
         !skipping { print }
-    ' "$file" > "$temporary_file" || { rm -f "$temporary_file"; die "could not update $file"; }
-    mv "$temporary_file" "$file"
+    ' "$file" || die "could not update $file"
     if ! grep -q '[^[:space:]]' "$file"; then
         rm -f "$file"
     fi
