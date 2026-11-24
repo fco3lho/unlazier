@@ -804,6 +804,12 @@ function Test-InjectUsageLines {
     Assert-That 'stale Claude reading is unknown' {
         (Get-LastLine (Invoke-Inject $testHome '.claude' 'claude' 'prompt')) -eq 'Usage: unknown (no usage reading from the last 15 minutes)'
     }
+
+    $state.captured_at = $now * 1000
+    Write-TestJson $stateFile $state
+    Assert-That 'a reading from the future (milliseconds) is unknown' {
+        (Get-LastLine (Invoke-Inject $testHome '.claude' 'claude' 'prompt')) -eq 'Usage: unknown (no usage reading from the last 15 minutes)'
+    }
 }
 
 # A damaged reading must degrade to the expected usage line: the prompt keeps its reminder and
@@ -1031,6 +1037,14 @@ function Test-InjectDispatchGate {
     Write-ClaudeUsage $testHome 96 40 3600
     Assert-That 'a stale reading never blocks' {
         @((Invoke-Inject $testHome '.claude' 'claude' 'dispatch').Lines | Where-Object { $_ -ne '' }).Count -eq 0
+    }
+    Write-ClaudeUsage $testHome 96 40 -600
+    Assert-That 'a reading from the future never blocks' {
+        @((Invoke-Inject $testHome '.claude' 'claude' 'dispatch').Lines | Where-Object { $_ -ne '' }).Count -eq 0
+    }
+    Write-ClaudeUsage $testHome 96 40 -60
+    Assert-That 'a reading a minute ahead still counts' {
+        (ConvertFrom-OutputJson (Invoke-Inject $testHome '.claude' 'claude' 'dispatch')).hookSpecificOutput.permissionDecision -eq 'deny'
     }
     Remove-Item -LiteralPath (Join-TestPath $testHome '.claude/state/rate_limits.json') -Force
     Assert-That 'a missing reading never blocks' {

@@ -22,6 +22,9 @@ Set-StrictMode -Version 2.0
 $ScriptDirectory = $PSScriptRoot
 $HarnessHome = Split-Path -Parent $ScriptDirectory
 $MaxReadingAgeSeconds = 900
+# A reading further ahead than this (milliseconds instead of seconds, or a wrong clock) would never
+# go stale, so it counts as stale at once.
+$MaxClockSkewSeconds = 300
 $MaxSectionTitles = 12
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
@@ -235,6 +238,12 @@ function Read-Usage {
     }
 }
 
+function Test-StaleReading {
+    param($CapturedAt, [double]$Now)
+    return $null -eq $CapturedAt -or ($Now - $CapturedAt) -gt $MaxReadingAgeSeconds -or
+        ($CapturedAt - $Now) -gt $MaxClockSkewSeconds
+}
+
 function Get-UsageLine {
     param([string]$Harness)
     $now = Get-UnixTimeNow
@@ -247,7 +256,7 @@ function Get-UsageLine {
     if ($null -eq $reading) {
         return 'Usage: unknown (no usage reading available)'
     }
-    if ($null -eq $reading.CapturedAt -or ($now - $reading.CapturedAt) -gt $MaxReadingAgeSeconds) {
+    if (Test-StaleReading $reading.CapturedAt $now) {
         return 'Usage: unknown (no usage reading from the last 15 minutes)'
     }
     $ageMinutes = ([long][System.Math]::Floor(($now - $reading.CapturedAt) / 60)).ToString([System.Globalization.CultureInfo]::InvariantCulture)
@@ -261,7 +270,7 @@ function Get-DispatchBlockReason {
     param([string]$Harness)
     $now = Get-UnixTimeNow
     $reading = Read-Usage $Harness $now
-    if ($null -eq $reading -or $null -eq $reading.CapturedAt -or ($now - $reading.CapturedAt) -gt $MaxReadingAgeSeconds) {
+    if ($null -eq $reading -or (Test-StaleReading $reading.CapturedAt $now)) {
         return ''
     }
     $usage = Get-UsageLine $Harness

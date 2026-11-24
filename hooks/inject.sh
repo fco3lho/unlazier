@@ -20,6 +20,9 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_HOME="$(dirname "$SCRIPT_DIR")"
 MAX_READING_AGE_SECONDS=900
+# A reading further ahead than this (milliseconds instead of seconds, or a wrong clock) would never
+# go stale, so it counts as stale at once.
+MAX_CLOCK_SKEW_SECONDS=300
 MAX_SECTION_TITLES=12
 
 # The "## " titles of a Markdown file, comma-separated, skipping fenced code blocks.
@@ -68,7 +71,7 @@ def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
 # shellcheck disable=SC2016
 FORMAT_USAGE_PROGRAM='
 def percent: if . == null then "unknown" else "\(. + 0.5 | floor)%" end;
-if .captured_at == null or (now - .captured_at) > $max_age then
+if .captured_at == null or (now - .captured_at) > $max_age or (.captured_at - now) > $max_skew then
     "Usage: unknown (no usage reading from the last 15 minutes)"
 else
     "Usage: 5h \(.five_hour | percent) | weekly \(.weekly | percent) (source: \($source), \((now - .captured_at) / 60 | floor) min old)"
@@ -81,7 +84,7 @@ end
 # shellcheck disable=SC2016
 DISPATCH_BLOCK_PROGRAM='
 def rounded: if . == null then -1 else (. + 0.5 | floor) end;
-if .captured_at == null or (now - .captured_at) > $max_age then empty
+if .captured_at == null or (now - .captured_at) > $max_age or (.captured_at - now) > $max_skew then empty
 elif (.weekly | rounded) >= 99 then
     "\($usage). The weekly window is at 99% or more: start no subagent; finish the current step, report, and wait for the user."
 elif (.five_hour | rounded) >= 85 then
@@ -134,7 +137,8 @@ usage_line() {
     fi
     # A failing usage line would make Claude Code block the prompt, so usage data never fails the hook.
     printf '%s' "$reading" | jq -r --arg source "$source" --argjson max_age "$MAX_READING_AGE_SECONDS" \
-        "$FORMAT_USAGE_PROGRAM" 2>/dev/null || echo "Usage: unknown (no usage reading available)"
+        --argjson max_skew "$MAX_CLOCK_SKEW_SECONDS" "$FORMAT_USAGE_PROGRAM" 2>/dev/null \
+        || echo "Usage: unknown (no usage reading available)"
 }
 
 # A missing or unreadable reading allows the subagent: the gate never blocks on unknown usage.
@@ -143,7 +147,7 @@ dispatch_block_reason() {
     reading="$(read_usage "$harness")" || return 0
     [ -n "$reading" ] || return 0
     printf '%s' "$reading" | jq -r --argjson max_age "$MAX_READING_AGE_SECONDS" \
-        --arg usage "$(usage_line "$harness")" "$DISPATCH_BLOCK_PROGRAM"
+        --argjson max_skew "$MAX_CLOCK_SKEW_SECONDS" --arg usage "$(usage_line "$harness")" "$DISPATCH_BLOCK_PROGRAM"
 }
 
 # Prints the project's own instruction file for the harness; fails for harnesses without one.

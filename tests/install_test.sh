@@ -571,6 +571,12 @@ test_inject_usage_lines() {
         > "$home/stale.json" && mv "$home/stale.json" "$home/.claude/state/rate_limits.json"
     check "stale Claude reading is unknown" test "$(last_line bash "$home/.claude/unlazier/inject.sh" claude prompt)" \
         = "Usage: unknown (no usage reading from the last 15 minutes)"
+
+    jq --argjson future "$((now * 1000))" '.captured_at = $future' "$home/.claude/state/rate_limits.json" \
+        > "$home/future.json" && mv "$home/future.json" "$home/.claude/state/rate_limits.json"
+    check "a reading from the future (milliseconds) is unknown" \
+        test "$(last_line bash "$home/.claude/unlazier/inject.sh" claude prompt)" \
+        = "Usage: unknown (no usage reading from the last 15 minutes)"
 }
 
 # A damaged reading must degrade to the expected usage line: the prompt keeps its reminder and
@@ -737,6 +743,11 @@ test_inject_dispatch_gate() {
         '.hookSpecificOutput.permissionDecisionReason | contains("weekly window is at 99% or more")'
     write_claude_usage "$home" 96 40 3600
     check "a stale reading never blocks" test -z "$(dispatch_of "$home")"
+    write_claude_usage "$home" 96 40 -600
+    check "a reading from the future never blocks" test -z "$(dispatch_of "$home")"
+    write_claude_usage "$home" 96 40 -60
+    check "a reading a minute ahead still counts" json_has <(dispatch_of "$home") \
+        '.hookSpecificOutput.permissionDecision == "deny"'
     rm -f "$home/.claude/state/rate_limits.json"
     check "a missing reading never blocks" test -z "$(dispatch_of "$home")"
 
