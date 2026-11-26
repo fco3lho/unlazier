@@ -157,8 +157,14 @@ test_install_adds_all_layers() {
         '[.hooks.UserPromptSubmit[].hooks[].command] | any(contains("inject.sh\" claude prompt"))'
     check "Claude compaction hook" json_has "$home/.claude/settings.json" \
         '.hooks.SessionStart | any(.matcher == "compact")'
-    check "Claude subagent usage hook" json_has "$home/.claude/settings.json" \
-        '.hooks.PostToolUse | any(.matcher == "Agent" and (.hooks | any(.command | contains("inject.sh\" claude subagent"))))'
+    check "Claude band hook after every tool" json_has "$home/.claude/settings.json" \
+        '.hooks.PostToolUse | any(has("matcher") | not) and any(.hooks | any(.command | contains("inject.sh\" claude tool")))'
+    check "Claude stop hook" json_has "$home/.claude/settings.json" \
+        '.hooks.Stop | any(.hooks | any(.command | contains("inject.sh\" claude stop")))'
+    check "Claude subagent start hook" json_has "$home/.claude/settings.json" \
+        '.hooks.SubagentStart | any(.hooks | any(.command | contains("inject.sh\" claude agent-start")))'
+    check "Claude subagent stop hook" json_has "$home/.claude/settings.json" \
+        '.hooks.SubagentStop | any(.hooks | any(.command | contains("inject.sh\" claude agent-stop")))'
     check "Claude subagent gate hook" json_has "$home/.claude/settings.json" \
         '.hooks.PreToolUse | any(.matcher == "Agent" and (.hooks | any(.command | contains("inject.sh\" claude dispatch"))))'
     check "Claude status line installed" json_has "$home/.claude/settings.json" \
@@ -228,8 +234,14 @@ test_reinstall_is_idempotent() {
     check "one block in Codex AGENTS.md" has_one_block "$home/.codex/AGENTS.md"
     check "one Claude prompt hook" json_has "$home/.claude/settings.json" \
         '[.hooks.UserPromptSubmit[].hooks[] | select(.command | contains("unlazier"))] | length == 1'
-    check "one Claude subagent usage hook" json_has "$home/.claude/settings.json" \
+    check "one Claude band hook" json_has "$home/.claude/settings.json" \
         '[.hooks.PostToolUse[].hooks[] | select(.command | contains("unlazier"))] | length == 1'
+    check "one Claude stop hook next to the alert" json_has "$home/.claude/settings.json" \
+        '[.hooks.Stop[].hooks[] | select(.command | contains("inject.sh\" claude stop"))] | length == 1'
+    check "one Claude subagent start hook" json_has "$home/.claude/settings.json" \
+        '[.hooks.SubagentStart[].hooks[] | select(.command | contains("unlazier"))] | length == 1'
+    check "one Claude subagent stop hook" json_has "$home/.claude/settings.json" \
+        '[.hooks.SubagentStop[].hooks[] | select(.command | contains("unlazier"))] | length == 1'
     check "one Claude subagent gate hook" json_has "$home/.claude/settings.json" \
         '[.hooks.PreToolUse[] | select(.matcher == "Agent") | .hooks[] | select(.command | contains("unlazier"))] | length == 1'
     check "one Claude question alert next to the gate" has_alert_hook "$home/.claude/settings.json" PreToolUse AskUserQuestion
@@ -554,29 +566,26 @@ test_inject_usage_lines() {
         seven_day: {used_percentage: 94, resets_at: ($now - 5)}}' > "$home/.claude/state/rate_limits.json"
     write_codex_rollout "$home" "$now"
 
-    check "Claude usage line" test "$(last_line bash "$home/.claude/unlazier/inject.sh" claude prompt)" \
-        = "Usage: 5h 24% | weekly unknown (source: Claude Code status line, 2 min old)"
-    check "Claude subagent context is only the usage line" json_has <(bash "$home/.claude/unlazier/inject.sh" claude subagent) \
-        '.hookSpecificOutput == {hookEventName: "PostToolUse",
-            additionalContext: "Usage: 5h 24% | weekly unknown (source: Claude Code status line, 2 min old)"}'
+    check "Claude usage line, with a passed reset as 0%" test "$(last_line bash "$home/.claude/unlazier/inject.sh" claude prompt)" \
+        = "Usage: 5h 24% | weekly 0% (source: Claude Code status line, 2 min old). Band 1: maximum parallelism."
     check "Codex usage line" test "$(last_line bash "$home/.codex/unlazier/inject.sh" codex prompt)" \
-        = "Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old)"
+        = "Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old). Band 1: maximum parallelism."
     check "Codex subagent context is only the usage line" json_has <(bash "$home/.codex/unlazier/inject.sh" codex subagent) \
         '.hookSpecificOutput == {hookEventName: "PostToolUse",
-            additionalContext: "Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old)"}'
-    check "Kiro usage unknown" test "$(last_line bash "$home/.kiro/unlazier/inject.sh" kiro prompt)" \
-        = "Usage: unknown (this tool does not expose usage windows)"
+            additionalContext: "Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old). Band 1: maximum parallelism."}'
+    check "Kiro usage unknown is band 2" test "$(last_line bash "$home/.kiro/unlazier/inject.sh" kiro prompt)" \
+        = "Usage: unknown (this tool does not expose usage windows). Band 2: start a subagent only while fewer than 2 are running."
 
     jq --argjson old "$((now - 3600))" '.captured_at = $old' "$home/.claude/state/rate_limits.json" \
         > "$home/stale.json" && mv "$home/stale.json" "$home/.claude/state/rate_limits.json"
     check "stale Claude reading is unknown" test "$(last_line bash "$home/.claude/unlazier/inject.sh" claude prompt)" \
-        = "Usage: unknown (no usage reading from the last 15 minutes)"
+        = "Usage: unknown (no usage reading from the last 15 minutes). Band 2: start a subagent only while fewer than 2 are running."
 
     jq --argjson future "$((now * 1000))" '.captured_at = $future' "$home/.claude/state/rate_limits.json" \
         > "$home/future.json" && mv "$home/future.json" "$home/.claude/state/rate_limits.json"
     check "a reading from the future (milliseconds) is unknown" \
         test "$(last_line bash "$home/.claude/unlazier/inject.sh" claude prompt)" \
-        = "Usage: unknown (no usage reading from the last 15 minutes)"
+        = "Usage: unknown (no usage reading from the last 15 minutes). Band 2: start a subagent only while fewer than 2 are running."
 }
 
 # Prints one Codex token_count event with a 5-hour window, as the session log stores it.
@@ -607,11 +616,11 @@ test_inject_codex_damaged_log() {
     } > "$home/.codex/sessions/2026/11/14/rollout-2026-11-14T10-00-00-b.jsonl"
     check "broken lines before the reading and a half-written last line are skipped" \
         test "$(last_line bash "$home/.codex/unlazier/inject.sh" codex prompt)" \
-        = "Usage: 5h 42% | weekly unknown (source: Codex session log, 1 min old)"
+        = "Usage: 5h 42% | weekly unknown (source: Codex session log, 1 min old). Band 2: start a subagent only while fewer than 2 are running."
 }
 
 # A damaged reading must degrade to the expected usage line: the prompt keeps its reminder and
-# exits 0, the subagent event still reports usage, and the gate allows the call.
+# exits 0, the Codex subagent event still reports usage, and the gate allows the call.
 check_degraded_usage() {
     local home="$1" folder="$2" harness="$3" description="$4" expected="$5" inject output status
     inject="$home/$folder/unlazier/inject.sh"
@@ -620,10 +629,12 @@ check_degraded_usage() {
     check "$description: the prompt exits 0 with the reminder" \
         test "$status $(printf '%s\n' "$output" | head -n 1)" = "0 Unlazier rules are active for this session."
     check "$description: usage line" test "$(printf '%s\n' "$output" | tail -n 1)" = "$expected"
-    check "$description: the subagent event reports it" \
-        json_has <(bash "$inject" "$harness" subagent </dev/null 2>/dev/null) ".hookSpecificOutput.additionalContext == \"$expected\""
+    if [ "$harness" = codex ]; then
+        check "$description: the subagent event reports it" \
+            json_has <(bash "$inject" "$harness" subagent </dev/null 2>/dev/null) ".hookSpecificOutput.additionalContext == \"$expected\""
+    fi
     check "$description: the gate allows silently" \
-        test "$(bash "$inject" "$harness" dispatch 2>/dev/null; echo "exit $?")" = "exit 0"
+        test "$(bash "$inject" "$harness" dispatch </dev/null 2>/dev/null; echo "exit $?")" = "exit 0"
 }
 
 test_inject_malformed_usage() {
@@ -637,23 +648,23 @@ test_inject_malformed_usage() {
 
     printf '{"captured_at":"oops","five_hour":{"used_percentage":40,"resets_at":%s}}\n' "$((now + 3600))" > "$state_file"
     check_degraded_usage "$home" .claude claude "captured_at as a string" \
-        "Usage: unknown (no usage reading from the last 15 minutes)"
+        "Usage: unknown (no usage reading from the last 15 minutes). Band 2: start a subagent only while fewer than 2 are running."
     output="$(bash "$home/.claude/unlazier/inject.sh" claude compact 2>/dev/null)"
     status=$?
-    check "captured_at as a string: compaction exits 0 with the principles" \
-        test "$status $(printf '%s\n' "$output" | head -n 1)" = "0 # Global Agent Rules"
+    check "captured_at as a string: compaction exits 0 with the reminder" \
+        test "$status $(printf '%s\n' "$output" | head -n 1)" = "0 Unlazier rules are active for this session."
     printf '{"captured_at":%s,"five_hour":{"used_percentage":"40","resets_at":%s},%s}\n' "$now" "$((now + 3600))" \
         '"seven_day":{"used_percentage":61.2,"resets_at":"oops"}' > "$state_file"
     check_degraded_usage "$home" .claude claude "percentages and reset times as strings" \
-        "Usage: 5h unknown | weekly 61% (source: Claude Code status line, 0 min old)"
+        "Usage: 5h unknown | weekly 61% (source: Claude Code status line, 0 min old). Band 2: start a subagent only while fewer than 2 are running."
     printf '[{"captured_at":%s,"five_hour":{"used_percentage":40,"resets_at":%s}}]\n' "$now" "$((now + 3600))" > "$state_file"
-    check_degraded_usage "$home" .claude claude "a JSON array" "Usage: unknown (no usage reading available)"
+    check_degraded_usage "$home" .claude claude "a JSON array" "Usage: unknown (no usage reading available). Band 2: start a subagent only while fewer than 2 are running."
     printf '{"captured_at":%s,' "$now" > "$state_file"
-    check_degraded_usage "$home" .claude claude "invalid JSON" "Usage: unknown (no usage reading available)"
+    check_degraded_usage "$home" .claude claude "invalid JSON" "Usage: unknown (no usage reading available). Band 2: start a subagent only while fewer than 2 are running."
     : > "$state_file"
-    check_degraded_usage "$home" .claude claude "an empty file" "Usage: unknown (no usage reading available)"
+    check_degraded_usage "$home" .claude claude "an empty file" "Usage: unknown (no usage reading available). Band 2: start a subagent only while fewer than 2 are running."
     printf '{"captured_at":%s}\n{"captured_at":%s}\n' "$now" "$now" > "$state_file"
-    check_degraded_usage "$home" .claude claude "two JSON documents" "Usage: unknown (no usage reading available)"
+    check_degraded_usage "$home" .claude claude "two JSON documents" "Usage: unknown (no usage reading available). Band 2: start a subagent only while fewer than 2 are running."
 
     mkdir -p "$home/.codex/sessions/2026/11/14"
     jq -cn --arg timestamp "$(jq -rn --argjson epoch "$((now - 60))" '$epoch | todate')" '
@@ -662,7 +673,7 @@ test_inject_malformed_usage() {
             secondary: {used_percent: 61.2, window_minutes: 10080, resets_at: "oops", resets_in_seconds: "soon"}}}}' \
         > "$home/.codex/sessions/2026/11/14/rollout-2026-11-14T10-00-00-b.jsonl"
     check_degraded_usage "$home" .codex codex "Codex percentages and reset times as strings" \
-        "Usage: 5h unknown | weekly 61% (source: Codex session log, 1 min old)"
+        "Usage: 5h unknown | weekly 61% (source: Codex session log, 1 min old). Band 2: start a subagent only while fewer than 2 are running."
 }
 
 # Runs inject.sh for the harness from the given directory, as the harness does from the project.
@@ -789,12 +800,20 @@ test_inject_output_formats() {
     local home
     echo "inject prints the shape each harness expects"
     home="$(new_home)"
-    run_installer "$home" --harness claude,gemini,devin,cline >/dev/null 2>&1
+    run_installer "$home" --harness claude,codex,kiro,gemini,devin,cline >/dev/null 2>&1
 
     check "Claude prompt is the reminder text" test "$(bash "$home/.claude/unlazier/inject.sh" claude prompt | head -n 1)" \
         = "Unlazier rules are active for this session."
-    check "Claude compaction starts with the principles" test \
-        "$(bash "$home/.claude/unlazier/inject.sh" claude compact | head -n 1)" = "# Global Agent Rules"
+    check "Claude compaction leaves the principles to Claude Code" test \
+        "$(bash "$home/.claude/unlazier/inject.sh" claude compact | grep -c '# Global Agent Rules')" = 0
+    check "Claude compaction brings back the reminder" test -n \
+        "$(bash "$home/.claude/unlazier/inject.sh" claude compact | head -n 1 | grep -F 'Unlazier rules are active')"
+    check "Claude compaction brings back the band" test -n \
+        "$(bash "$home/.claude/unlazier/inject.sh" claude compact | tail -n 1 | grep -F '. Band ')"
+    check "Codex compaction starts with the principles" test \
+        "$(bash "$home/.codex/unlazier/inject.sh" codex compact | head -n 1)" = "# Global Agent Rules"
+    check "Kiro compaction starts with the principles" test \
+        "$(bash "$home/.kiro/unlazier/inject.sh" kiro compact | head -n 1)" = "# Global Agent Rules"
     check "Gemini output is JSON" json_has <(bash "$home/.gemini/unlazier/inject.sh" gemini prompt) \
         '.hookSpecificOutput.additionalContext | startswith("Unlazier rules")'
     check "Devin output is JSON" json_has <(bash "$home/.devin/unlazier/inject.sh" devin prompt) \
@@ -802,11 +821,16 @@ test_inject_output_formats() {
     check "Cline output is JSON" json_has <(bash "$home/Documents/Cline/unlazier/inject.sh" cline prompt) \
         '.contextModification | startswith("Unlazier rules")'
     check "unknown event fails" test "$(bash "$home/.claude/unlazier/inject.sh" claude other >/dev/null 2>&1; echo $?)" = "2"
-    check "subagent event fails outside Claude" \
+    check "subagent event fails outside Codex" \
         test "$(bash "$home/.gemini/unlazier/inject.sh" gemini subagent >/dev/null 2>&1; echo $?)" = "2"
+    check "subagent event fails for Claude, which uses the tool event" \
+        test "$(bash "$home/.claude/unlazier/inject.sh" claude subagent </dev/null >/dev/null 2>&1; echo $?)" = "2"
+    check "band events are only for Claude" \
+        test "$(bash "$home/.gemini/unlazier/inject.sh" gemini tool </dev/null >/dev/null 2>&1; echo $?)" = "2"
 }
 
-# Writes a fresh Claude usage reading, or one captured the given number of seconds ago.
+# Writes a fresh Claude usage reading with resets in an hour and a day, or one captured the given
+# number of seconds ago.
 write_claude_usage() {
     local home="$1" five_hour="$2" weekly="$3" age="${4:-0}"
     mkdir -p "$home/.claude/state"
@@ -816,92 +840,288 @@ write_claude_usage() {
         seven_day: {used_percentage: $weekly, resets_at: ($now + 86400)}}' > "$home/.claude/state/rate_limits.json"
 }
 
-dispatch_of() { bash "$1/.claude/unlazier/inject.sh" claude dispatch; }
+claude_inject() { local home="$1"; shift; bash "$home/.claude/unlazier/inject.sh" claude "$@"; }
 
-test_inject_dispatch_gate() {
+# Runs a Claude hook event with the given hook input on standard input.
+claude_hook() { local home="$1" event="$2" input="$3"; printf '%s' "$input" | claude_inject "$home" "$event"; }
+
+band_of() { claude_inject "$1" prompt </dev/null | tail -n 1 | sed -n 's/.*\. Band \([0-9]\):.*/\1/p'; }
+
+session_state() { cat "$1/.claude/unlazier/state/session-s1.json"; }
+
+test_usage_bands() {
     local home now
-    echo "the subagent gate blocks only where the usage ladder forbids subagents"
+    echo "the stricter usage window sets the band"
     home="$(new_home)"
     now="$(date +%s)"
-    run_installer "$home" --harness claude,codex,gemini >/dev/null 2>&1
+    run_installer "$home" --harness claude,codex >/dev/null 2>&1
 
-    write_claude_usage "$home" 84.4 40
-    check "below 85% the gate allows" dispatch_of "$home"
-    check "below 85% the gate prints nothing" test -z "$(dispatch_of "$home")"
-    write_claude_usage "$home" 84.6 40
-    check "85% after rounding is denied" json_has <(dispatch_of "$home") \
-        '.hookSpecificOutput | .hookEventName == "PreToolUse" and .permissionDecision == "deny"
-            and (.permissionDecisionReason | startswith("Usage: 5h 85%") and contains("continue the work sequentially"))'
+    write_claude_usage "$home" 70.4 10
+    check "5h 70% is band 1" test "$(band_of "$home")" = 1
+    write_claude_usage "$home" 70.6 10
+    check "5h 71% is band 2" test "$(band_of "$home")" = 2
+    write_claude_usage "$home" 85 10
+    check "5h 85% is band 2" test "$(band_of "$home")" = 2
+    write_claude_usage "$home" 86 10
+    check "5h 86% is band 3" test "$(band_of "$home")" = 3
+    write_claude_usage "$home" 95 10
+    check "5h 95% is band 3" test "$(band_of "$home")" = 3
+    write_claude_usage "$home" 96 10
+    check "5h 96% is band 4" test "$(band_of "$home")" = 4
+    write_claude_usage "$home" 10 90
+    check "weekly 90% is band 1" test "$(band_of "$home")" = 1
+    write_claude_usage "$home" 10 91
+    check "weekly 91% is band 2" test "$(band_of "$home")" = 2
+    write_claude_usage "$home" 10 96
+    check "weekly 96% is band 3" test "$(band_of "$home")" = 3
+    write_claude_usage "$home" 10 98
+    check "weekly 98% is band 3" test "$(band_of "$home")" = 3
     write_claude_usage "$home" 10 99
-    check "weekly 99% is denied with a pause" json_has <(dispatch_of "$home") \
-        '.hookSpecificOutput.permissionDecisionReason | contains("weekly window is at 99% or more")'
-    write_claude_usage "$home" 96 40 3600
-    check "a stale reading never blocks" test -z "$(dispatch_of "$home")"
-    write_claude_usage "$home" 96 40 -600
-    check "a reading from the future never blocks" test -z "$(dispatch_of "$home")"
-    write_claude_usage "$home" 96 40 -60
-    check "a reading a minute ahead still counts" json_has <(dispatch_of "$home") \
-        '.hookSpecificOutput.permissionDecision == "deny"'
+    check "weekly 99% is band 4" test "$(band_of "$home")" = 4
+    write_claude_usage "$home" 72 96
+    check "the stricter window wins" test "$(band_of "$home")" = 3
+    write_claude_usage "$home" 96 10
+    check "Claude band 4 names the waiter" test -n "$(claude_inject "$home" prompt </dev/null | tail -n 1 \
+        | grep -F 'Band 4: start nothing new; running subagents wrap up, then start the waiter and end the turn.')"
+    check "a band 4 prompt gives the waiter command of its session" test -n "$(claude_hook "$home" prompt \
+        '{"session_id":"s1"}' | tail -n 1 | grep -F "inject.sh\" claude wait s1")"
     rm -f "$home/.claude/state/rate_limits.json"
-    check "a missing reading never blocks" test -z "$(dispatch_of "$home")"
+    check "no reading is band 2" test "$(band_of "$home")" = 2
 
-    write_codex_rollout "$home" "$now"
-    check "Codex at 43% allows silently" test -z "$(bash "$home/.codex/unlazier/inject.sh" codex dispatch)"
     mkdir -p "$home/.codex/sessions/2026/11/15"
-    jq -cn --arg timestamp "$(jq -rn --argjson epoch "$now" '$epoch | todate')" --argjson resets "$((now + 999))" \
-        '{timestamp: $timestamp, type: "event_msg", payload: {type: "token_count",
-            rate_limits: {primary: {used_percent: 90, window_minutes: 300, resets_at: $resets}}}}' \
+    codex_reading "$(jq -rn --argjson epoch "$now" '$epoch | todate')" 96 "$((now + 999))" \
         > "$home/.codex/sessions/2026/11/15/rollout-2026-11-15T10-00-00-c.jsonl"
-    check "Codex at 90% is denied" json_has <(bash "$home/.codex/unlazier/inject.sh" codex dispatch) \
-        '.hookSpecificOutput | .permissionDecision == "deny"
-            and (.permissionDecisionReason | startswith("Usage: 5h 90%") and contains("source: Codex session log"))'
-    check "the gate is only for Claude and Codex" \
-        test "$(bash "$home/.gemini/unlazier/inject.sh" gemini dispatch >/dev/null 2>&1; echo $?)" = "2"
+    check "Codex band 4 reports and waits for the user" test -n "$(bash "$home/.codex/unlazier/inject.sh" codex prompt \
+        | tail -n 1 | grep -F 'Band 4: start nothing new; finish the current step, report, and wait for the user.')"
 }
 
-test_inject_background_subagent() {
-    local home inject reports_usage background
-    echo "a subagent launched in the background adds no usage line"
+is_between() { [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]; }
+
+dispatch_input() { printf '{"session_id":"s1","tool_use_id":"%s","tool_name":"Agent"}' "$1"; }
+
+is_denied() {
+    jq -e '.hookSpecificOutput | .hookEventName == "PreToolUse" and .permissionDecision == "deny"' >/dev/null
+}
+
+dispatch_denied() { claude_hook "$1" dispatch "$(dispatch_input "$2")" | is_denied; }
+dispatch_allowed() { test -z "$(claude_hook "$1" dispatch "$(dispatch_input "$2")")"; }
+
+test_dispatch_gate_counts_running_subagents() {
+    local home index allowed
+    echo "the subagent gate follows the band and the running subagents"
+    home="$(new_home)"
+    run_installer "$home" --harness claude >/dev/null 2>&1
+
+    write_claude_usage "$home" 50 10
+    for index in 1 2 3 4; do claude_hook "$home" agent-start "{\"session_id\":\"s1\",\"agent_id\":\"a$index\"}"; done
+    check "band 1 allows with four running" dispatch_allowed "$home" t0
+    for index in 1 2 3 4; do claude_hook "$home" agent-stop "{\"session_id\":\"s1\",\"agent_id\":\"a$index\"}"; done
+
+    write_claude_usage "$home" 80 10
+    check "band 2 allows the first subagent" dispatch_allowed "$home" t1
+    check "band 2 allows the second subagent" dispatch_allowed "$home" t2
+    check "band 2 denies a third launch" dispatch_denied "$home" t3
+    check "the denial says two are running" test -n "$(claude_hook "$home" dispatch "$(dispatch_input t3)" \
+        | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -F '2 subagents are running')"
+    claude_hook "$home" agent-start '{"session_id":"s1","agent_id":"a1"}'
+    claude_hook "$home" agent-start '{"session_id":"s1","agent_id":"a2"}'
+    check "two started subagents replace their reservations" json_has <(session_state "$home") \
+        '(.agents | length) == 2 and (.reservations | length) == 0'
+    check "band 2 still denies with two running" dispatch_denied "$home" t4
+    claude_hook "$home" agent-stop '{"session_id":"s1","agent_id":"a1"}'
+    check "band 2 allows again when one finishes" dispatch_allowed "$home" t5
+
+    write_claude_usage "$home" 90 10
+    check "band 3 denies" dispatch_denied "$home" t6
+    check "band 3 asks to work alone" test -n "$(claude_hook "$home" dispatch "$(dispatch_input t6)" \
+        | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -F 'continue the work yourself')"
+    write_claude_usage "$home" 97 10
+    check "band 4 denies" dispatch_denied "$home" t7
+
+    jq -n '{agents: {old: (now - 18001)}, reservations: [now - 121]}' > "$home/.claude/unlazier/state/session-s1.json"
+    write_claude_usage "$home" 80 10
+    check "expired entries no longer count" json_has <(claude_hook "$home" dispatch "$(dispatch_input t8)"; session_state "$home") \
+        '(.agents | length) == 0 and (.reservations | length) == 1'
+
+    rm -f "$home/.claude/unlazier/state/session-s1.json"
+    for index in 1 2 3 4 5 6; do
+        (claude_hook "$home" dispatch "$(dispatch_input "p$index")" > "$home/parallel-$index.out") &
+    done
+    wait
+    allowed="$(for index in 1 2 3 4 5 6; do [ -s "$home/parallel-$index.out" ] || echo allowed; done | wc -l | tr -d ' ')"
+    check "six parallel launches in band 2 allow exactly two" test "$allowed" = 2
+
+    rm -f "$home/.claude/state/rate_limits.json"
+    rm -f "$home/.claude/unlazier/state/session-s1.json"
+    check "unknown usage allows two" dispatch_allowed "$home" u1
+    dispatch_allowed "$home" u2
+    check "unknown usage denies a third" dispatch_denied "$home" u3
+
+    write_claude_usage "$home" 80 10
+    rm -f "$home/.claude/unlazier/state/session-s1.json"
+    : > "$home/.claude/unlazier/state/session-s1.json"
+    check "an empty state file counts as no subagents" dispatch_allowed "$home" e1
+    check "the empty state file is rebuilt" json_has <(session_state "$home") '(.reservations | length) == 1'
+    rm -f "$home/.claude/unlazier/state/session-s1.json"
+    chmod a-w "$home/.claude/unlazier/state"
+    check "a state folder that cannot be written allows the call" dispatch_allowed "$home" w1
+    chmod u+w "$home/.claude/unlazier/state"
+    check "an unsafe session id is not counted and allowed" \
+        test -z "$(claude_hook "$home" dispatch '{"session_id":"../x","tool_use_id":"t9"}')"
+    check "no state file escapes the state folder" file_absent "$home/.claude/unlazier/x.json"
+    run_uninstaller "$home" --harness claude >/dev/null 2>&1
+    check "uninstalling removes the session state" file_absent "$home/.claude/unlazier/state"
+}
+
+tool_context() { claude_hook "$1" tool "$2" | jq -r '.hookSpecificOutput.additionalContext'; }
+
+test_tool_hook_announces_band_changes() {
+    local home
+    echo "the tool hook speaks only when the band changes"
+    home="$(new_home)"
+    run_installer "$home" --harness claude >/dev/null 2>&1
+
+    write_claude_usage "$home" 50 10
+    claude_hook "$home" prompt '{"session_id":"s1"}' >/dev/null
+    check "same band as the prompt is silent" test -z "$(claude_hook "$home" tool '{"session_id":"s1"}')"
+    write_claude_usage "$home" 72 10
+    check "a band change reaches the main agent" test -n "$(tool_context "$home" '{"session_id":"s1"}' \
+        | grep -F 'Band 2: start a subagent only while fewer than 2 are running.')"
+    check "the same band again is silent" test -z "$(claude_hook "$home" tool '{"session_id":"s1"}')"
+    check "a subagent below band 4 is silent" \
+        test -z "$(claude_hook "$home" tool '{"session_id":"s1","agent_id":"a1","agent_type":"Explore"}')"
+    write_claude_usage "$home" 96 10
+    check "band 4 tells a subagent to wrap up" test -n "$(tool_context "$home" \
+        '{"session_id":"s1","agent_id":"a1","agent_type":"Explore"}' | grep -F 'Wrap up now')"
+    check "the wrap-up is said once" \
+        test -z "$(claude_hook "$home" tool '{"session_id":"s1","agent_id":"a1","agent_type":"Explore"}')"
+    check "band 4 gives the main agent the waiter command" test -n "$(tool_context "$home" '{"session_id":"s1"}' \
+        | grep -F "inject.sh\" claude wait s1")"
+    check "no session id is silent" test -z "$(claude_hook "$home" tool '{}')"
+}
+
+# The Stop hook input of a Claude Code session whose transcript is in the test home, or at the
+# given transcript path.
+stop_input() {
+    jq -cn --argjson active "$1" --arg message "$2" --arg transcript "${3:-$STOP_TRANSCRIPT}" '{session_id: "s1",
+        transcript_path: $transcript, stop_hook_active: $active, last_assistant_message: $message}'
+}
+
+is_blocked() { jq -e '.decision == "block" and (.reason | length > 0)' >/dev/null; }
+
+test_stop_hook() {
+    local home sleeper
+    echo "the stop hook keeps the turn going where the bands say so"
+    home="$(new_home)"
+    run_installer "$home" --harness claude >/dev/null 2>&1
+    mkdir -p "$home/.claude/unlazier/state"
+    STOP_TRANSCRIPT="$home/.claude/projects/-project/s1.jsonl"
+
+    write_claude_usage "$home" 96 10
+    check "another tool running the Claude Code hooks is never held" test -z "$(claude_hook "$home" stop \
+        "$(stop_input false 'Done.' "$home/.devin/transcripts/s1.jsonl")")"
+    check "band 4 without a waiter blocks the stop" is_blocked < <(claude_hook "$home" stop "$(stop_input false 'Done.')")
+    check "the block names the waiter" test -n "$(claude_hook "$home" stop "$(stop_input false 'Done.')" \
+        | jq -r '.reason' | grep -F "inject.sh\" claude wait s1")"
+    check "a stop already continued by the hook ends" test -z "$(claude_hook "$home" stop "$(stop_input true 'Done.')")"
+    sleep 30 &
+    sleeper=$!
+    jq -n --argjson pid "$sleeper" '{waiter: {pid: $pid, until: (now + 600)}}' > "$home/.claude/unlazier/state/session-s1.json"
+    check "a live waiter lets the turn end" test -z "$(claude_hook "$home" stop "$(stop_input false 'Done.')")"
+    kill "$sleeper" 2>/dev/null
+    wait "$sleeper" 2>/dev/null
+    check "a dead waiter blocks again" is_blocked < <(claude_hook "$home" stop "$(stop_input false 'Done.')")
+
+    write_claude_usage "$home" 90 10
+    check "band 3 blocks a stop that cites usage" is_blocked < <(claude_hook "$home" stop \
+        "$(stop_input false 'Por que parei aqui: o uso está acima de 90% da janela de 5 horas.')")
+    check "band 3 lets a finished task end" test -z "$(claude_hook "$home" stop "$(stop_input false 'All tests pass.')")"
+    write_claude_usage "$home" 40 10
+    check "band 1 lets any stop end" \
+        test -z "$(claude_hook "$home" stop "$(stop_input false 'The 5-hour window is at 40%.')")"
+}
+
+# A stand-in for sleep that records how long the waiter asked to sleep and the state at that moment.
+install_fake_sleep() {
+    local folder="$1"
+    mkdir -p "$folder"
+    cat > "$folder/sleep" <<'SLEEP'
+#!/bin/bash
+printf '%s\n' "$1" >> "$FAKE_SLEEP_LOG"
+cat "$FAKE_SLEEP_STATE" >> "$FAKE_SLEEP_LOG" 2>/dev/null
+SLEEP
+    chmod +x "$folder/sleep"
+}
+
+run_waiter() {
+    local home="$1"
+    shift
+    PATH="$home/fake-bin:$PATH" FAKE_SLEEP_LOG="$home/sleep.log" \
+        FAKE_SLEEP_STATE="$home/.claude/unlazier/state/session-s1.json" claude_inject "$home" wait "$@"
+}
+
+test_waiter() {
+    local home now output seconds status
+    echo "the waiter sleeps once until the reset plus three minutes"
     home="$(new_home)"
     run_installer "$home" --harness claude,codex >/dev/null 2>&1
-    write_claude_usage "$home" 40 50
-    inject="$home/.claude/unlazier/inject.sh"
-    reports_usage='.hookSpecificOutput.hookEventName == "PostToolUse"
-        and (.hookSpecificOutput.additionalContext | startswith("Usage: "))'
-    background='{"tool_input":{"run_in_background":true}}'
+    install_fake_sleep "$home/fake-bin"
+    now="$(date +%s)"
 
-    check "a background launch prints nothing" \
-        test "$(printf '%s' "$background" | bash "$inject" claude subagent; echo "exit $?")" = "exit 0"
-    check "a foreground launch reports usage" json_has \
-        <(printf '%s' '{"tool_input":{"run_in_background":false}}' | bash "$inject" claude subagent) "$reports_usage"
-    check "a launch Claude Code sent to the background prints nothing" test "$(printf '%s' \
-        '{"tool_input":{"prompt":"x"},"tool_response":{"status":"async_launched","agentId":"a1"}}' \
-        | bash "$inject" claude subagent; echo "exit $?")" = "exit 0"
-    check "a remote launch prints nothing" test "$(printf '%s' '{"tool_response":{"status":"remote_launched"}}' \
-        | bash "$inject" claude subagent; echo "exit $?")" = "exit 0"
-    check "a completed subagent reports usage" json_has \
-        <(printf '%s' '{"tool_response":{"status":"completed"}}' | bash "$inject" claude subagent) "$reports_usage"
-    check "invalid hook input reports usage" json_has <(printf 'not json' | bash "$inject" claude subagent) "$reports_usage"
-    check "empty hook input reports usage" json_has <(bash "$inject" claude subagent </dev/null) "$reports_usage"
-    check "closed standard input reports usage" json_has <(bash "$inject" claude subagent <&-) "$reports_usage"
-    check "Codex ignores the background flag" json_has \
-        <(printf '%s' "$background" | bash "$home/.codex/unlazier/inject.sh" codex subagent) "$reports_usage"
+    write_claude_usage "$home" 50 10
+    output="$(run_waiter "$home" s1)"
+    check "below band 4 it returns at once" test -n "$(printf '%s' "$output" | grep -F 'No wait needed')"
+    check "below band 4 it does not sleep" file_absent "$home/sleep.log"
+
+    mkdir -p "$home/.claude/state"
+    jq -n --argjson now "$now" '{captured_at: $now, five_hour: {used_percentage: 97, resets_at: ($now + 600)},
+        seven_day: {used_percentage: 10, resets_at: ($now + 86400)}}' > "$home/.claude/state/rate_limits.json"
+    output="$(run_waiter "$home" s1)"
+    seconds="$(head -n 1 "$home/sleep.log")"
+    check "one sleep until the 5-hour reset plus 180 seconds" is_between "$seconds" 778 781
+    check "the waiter is recorded while it sleeps" json_has <(sed -n 2p "$home/sleep.log") '.waiter.pid > 0'
+    check "the record is removed afterwards" json_has <(session_state "$home") 'has("waiter") | not'
+    check "it ends by asking to resume" test -n "$(printf '%s' "$output" | grep -F 'Resume the plan')"
+
+    rm -f "$home/sleep.log"
+    jq -n --argjson now "$now" '{captured_at: $now, five_hour: {used_percentage: 97, resets_at: ($now + 600)},
+        seven_day: {used_percentage: 99, resets_at: ($now + 86400)}}' > "$home/.claude/state/rate_limits.json"
+    run_waiter "$home" s1 >/dev/null
+    seconds="$(head -n 1 "$home/sleep.log")"
+    check "with both windows full it waits for the later reset" is_between "$seconds" 86578 86581
+
+    rm -f "$home/sleep.log"
+    jq -n --argjson now "$now" '{captured_at: $now, five_hour: {used_percentage: 97}}' \
+        > "$home/.claude/state/rate_limits.json"
+    output="$(run_waiter "$home" s1 2>&1)"
+    status=$?
+    check "an unknown reset time fails" test "$status" = 1
+    check "an unknown reset time does not sleep" file_absent "$home/sleep.log"
+    check "the failure says to report" test -n "$(printf '%s' "$output" | grep -F 'report')"
+
+    check "an unsafe session id is refused" test "$(run_waiter "$home" '../x' >/dev/null 2>&1; echo $?)" = 2
+    check "a missing session id is refused" test "$(run_waiter "$home" >/dev/null 2>&1; echo $?)" = 2
+    check "the waiter is only for Claude" \
+        test "$(bash "$home/.codex/unlazier/inject.sh" codex wait s1 >/dev/null 2>&1; echo $?)" = 2
 }
 
-test_auto_continue_notice() {
-    local home output
-    echo "the installer reports auto-continue turned off without changing it"
+test_upgrade_replaces_claude_usage_hooks() {
+    local home settings
+    echo "upgrading replaces the 2.4 Claude usage hooks"
     home="$(new_home)"
+    settings="$home/.claude/settings.json"
     mkdir -p "$home/.claude"
-    jq -n '{autoContinueAtUsageLimit: false}' > "$home/.claude/settings.json"
-    output="$(run_installer "$home" --harness claude 2>&1)"
+    jq -n --arg old "bash \"$home/.claude/unlazier/inject.sh\" claude subagent" \
+        '{hooks: {PostToolUse: [{matcher: "Agent", hooks: [{type: "command", command: $old}]},
+            {matcher: "Agent", hooks: [{type: "command", command: "my-own-hook"}]}]}}' > "$settings"
+    run_installer "$home" --harness claude >/dev/null 2>&1
 
-    check "the notice names the setting" test -n "$(printf '%s' "$output" | grep 'autoContinueAtUsageLimit is off')"
-    check "the setting stays off" json_has "$home/.claude/settings.json" '.autoContinueAtUsageLimit == false'
-    jq '.autoContinueAtUsageLimit = true' "$home/.claude/settings.json" > "$home/on.json" \
-        && mv "$home/on.json" "$home/.claude/settings.json"
-    output="$(run_installer "$home" --harness claude 2>&1)"
-    check "no notice when it is on" test -z "$(printf '%s' "$output" | grep 'autoContinueAtUsageLimit is off')"
+    check "the old subagent usage hook is gone" json_has "$settings" \
+        '[.hooks.PostToolUse[].hooks[].command] | any(contains("claude subagent")) | not'
+    check "the user's own hook is kept" json_has "$settings" \
+        '[.hooks.PostToolUse[].hooks[].command] | any(. == "my-own-hook")'
+    check "the end-of-turn alert sits next to the stop hook" json_has "$settings" \
+        '[.hooks.Stop[].hooks[].command] | (any(contains("alert.sh")) and any(contains("claude stop")))'
 }
 
 test_upgrade_removes_obsolete_payload() {
@@ -982,6 +1202,9 @@ test_statusline_upgrade() {
 
 main() {
     command -v jq >/dev/null 2>&1 || { echo "jq is required to run these tests" >&2; exit 1; }
+    # Hook events read their input from standard input; a terminal or an open pipe would make
+    # an event run without input wait for it.
+    exec </dev/null
     test_install_preserves_user_content
     test_install_adds_all_layers
     test_reinstall_is_idempotent
@@ -1004,9 +1227,12 @@ main() {
     test_inject_output_formats
     test_inject_project_rules
     test_inject_untrusted_project_rules
-    test_inject_dispatch_gate
-    test_inject_background_subagent
-    test_auto_continue_notice
+    test_usage_bands
+    test_dispatch_gate_counts_running_subagents
+    test_tool_hook_announces_band_changes
+    test_stop_hook
+    test_waiter
+    test_upgrade_replaces_claude_usage_hooks
     test_upgrade_removes_obsolete_payload
     test_statusline_saves_usage
     test_statusline_temporary_file_unpredictable

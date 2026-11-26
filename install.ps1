@@ -369,16 +369,34 @@ param(
         return ($null -ne $command) -and [regex]::IsMatch([string]$command, $OwnedScriptPattern)
     }
 
-    # With a matcher, only entries for that matcher lose our commands, because one event can carry
-    # several of ours (Claude Code PreToolUse has both the question alert and the subagent gate).
+    # The payload script a hook command runs (inject, alert, or claude-statusline), or $null.
+    function Get-PayloadScript {
+        param([string]$Command)
+        $match = [regex]::Match($Command, '(inject|alert|claude-statusline)[.](sh|ps1)')
+        if ($match.Success) {
+            return $match.Groups[1].Value
+        }
+        return $null
+    }
+
+    # True for a hook of ours; with a script name, only for one of ours that runs that script.
+    function Test-OurHookRunning {
+        param($Hook, $ScriptName)
+        return (Test-OurCommand $Hook) -and
+            ($null -eq $ScriptName -or (Get-PayloadScript (Get-JsonProperty $Hook 'command')) -ceq $ScriptName)
+    }
+
+    # With a matcher, only entries for that matcher lose our commands, and with a script name only
+    # our commands that run it, because one event can carry several of ours (Claude Code PreToolUse
+    # has the question alert and the subagent gate, and Stop has the end-of-turn alert and the band hook).
     function Remove-OurHookEntries {
-        param([object[]]$Entries, $Matcher = $null)
+        param([object[]]$Entries, $Matcher = $null, $ScriptName = $null)
         $kept = New-Object System.Collections.ArrayList
         foreach ($entry in $Entries) {
             $hooks = Get-JsonProperty $entry 'hooks'
             $isTargeted = ($null -eq $Matcher) -or ([string](Get-JsonProperty $entry 'matcher') -eq $Matcher)
             if ($isTargeted -and $hooks -is [array]) {
-                [object[]]$remaining = @($hooks | Where-Object { -not (Test-OurCommand $_) })
+                [object[]]$remaining = @($hooks | Where-Object { -not (Test-OurHookRunning $_ $ScriptName) })
                 if ($remaining.Count -eq 0) {
                     continue
                 }
@@ -405,7 +423,7 @@ param(
             if ($existing -isnot [array]) {
                 return $false
             }
-            $entries = Remove-OurHookEntries $existing $Matcher
+            $entries = Remove-OurHookEntries $existing $Matcher (Get-PayloadScript $Command)
         }
         $entry = [ordered]@{}
         if ($Matcher) {
@@ -416,34 +434,47 @@ param(
         return $true
     }
 
+    # Removes our entries from every event, or only those that run one payload script; events left
+    # empty go.
+    function Remove-OurEventEntries {
+        param($Hooks, $ScriptName = $null)
+        foreach ($property in @($Hooks.PSObject.Properties)) {
+            if ($property.Value -isnot [array]) {
+                continue
+            }
+            [object[]]$remaining = Remove-OurHookEntries $property.Value $null $ScriptName
+            if ($remaining.Count -eq 0) {
+                $Hooks.PSObject.Properties.Remove($property.Name)
+            } else {
+                $property.Value = $remaining
+            }
+        }
+    }
+
     function Remove-OurHooks {
         param($Document)
         $hooks = Get-JsonProperty $Document 'hooks'
         if ($hooks -isnot [System.Management.Automation.PSCustomObject]) {
             return
         }
-        foreach ($property in @($hooks.PSObject.Properties)) {
-            if ($property.Value -isnot [array]) {
-                continue
-            }
-            [object[]]$remaining = Remove-OurHookEntries $property.Value
-            if ($remaining.Count -eq 0) {
-                $hooks.PSObject.Properties.Remove($property.Name)
-            } else {
-                $property.Value = $remaining
-            }
-        }
+        Remove-OurEventEntries $hooks
         if (@($hooks.PSObject.Properties).Count -eq 0) {
             $Document.PSObject.Properties.Remove('hooks')
         }
     }
 
     # Applies the registrations to a hook config; returns $false when the file was left unchanged.
+    # With a replaced script, every entry of ours that runs it goes first, so an upgrade also
+    # removes hooks that a version no longer uses.
     function Update-HookConfig {
-        param([string]$Path, [object[]]$Registrations)
+        param([string]$Path, [object[]]$Registrations, $ReplacedScript = $null)
         $document = Read-JsonConfig $Path
         if ($null -eq $document) {
             return $false
+        }
+        $hooks = Get-JsonProperty $document 'hooks'
+        if ($null -ne $ReplacedScript -and $hooks -is [System.Management.Automation.PSCustomObject]) {
+            Remove-OurEventEntries $hooks $ReplacedScript
         }
         foreach ($registration in $Registrations) {
             if (-not (Add-HookEntry $document $registration.EventName $registration.Matcher $registration.Command)) {
@@ -491,15 +522,19 @@ param(
         $harnessHome = Get-HarnessHome $Name
         switch ($Name) {
             'claude' {
-                # The reminder reaches the model only with a prompt; the PostToolUse hook refreshes
-                # the usage line after each subagent, the long step of a turn, and the PreToolUse
-                # hook blocks a new subagent while the usage ladder forbids one.
+                # The reminder reaches the model only with a prompt. The PostToolUse hook runs after
+                # every tool call, in subagents too, and speaks only when the usage band changes; the
+                # PreToolUse hook blocks a subagent the band forbids, counting the running ones through
+                # SubagentStart and SubagentStop; the Stop hook keeps band 4 from ending without the waiter.
                 return Update-HookConfig ([System.IO.Path]::Combine($harnessHome, 'settings.json')) @(
                     (New-Registration 'UserPromptSubmit' '' (Get-HookCommand 'claude' 'prompt')),
                     (New-Registration 'SessionStart' 'compact' (Get-HookCommand 'claude' 'compact')),
-                    (New-Registration 'PostToolUse' 'Agent' (Get-HookCommand 'claude' 'subagent')),
-                    (New-Registration 'PreToolUse' 'Agent' (Get-HookCommand 'claude' 'dispatch'))
-                )
+                    (New-Registration 'PreToolUse' 'Agent' (Get-HookCommand 'claude' 'dispatch')),
+                    (New-Registration 'PostToolUse' '' (Get-HookCommand 'claude' 'tool')),
+                    (New-Registration 'Stop' '' (Get-HookCommand 'claude' 'stop')),
+                    (New-Registration 'SubagentStart' '' (Get-HookCommand 'claude' 'agent-start')),
+                    (New-Registration 'SubagentStop' '' (Get-HookCommand 'claude' 'agent-stop'))
+                ) 'inject'
             }
             'codex' {
                 # Same usage hooks as Claude Code. The matcher is unanchored so it also matches the
@@ -1197,23 +1232,6 @@ param(
         param([string]$Name)
         $harnessHome = Get-HarnessHome $Name
         switch ($Name) {
-            'claude' {
-                # Read only to explain what happens at the usage limit; the user's choice is never
-                # changed.
-                $settings = [System.IO.Path]::Combine($harnessHome, 'settings.json')
-                if (Test-Path -LiteralPath $settings -PathType Leaf) {
-                    try {
-                        $document = ConvertFrom-JsonText (Read-TextFile $settings).Text
-                    } catch {
-                        # Register-Hooks reads the same file and reports it as invalid.
-                        $document = $null
-                    }
-                    $autoContinue = Get-JsonProperty $document 'autoContinueAtUsageLimit'
-                    if ($autoContinue -is [bool] -and -not $autoContinue) {
-                        Add-Notice 'Claude Code: autoContinueAtUsageLimit is off, so after a usage limit the session waits for you instead of continuing the task on its own. Unlazier keeps your choice; turn it on in /config, or start a single wait from /rate-limit-options.'
-                    }
-                }
-            }
             'codex' {
                 $override = [System.IO.Path]::Combine($harnessHome, 'AGENTS.override.md')
                 if (Test-Path -LiteralPath $override -PathType Leaf) {
