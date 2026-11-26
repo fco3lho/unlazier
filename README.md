@@ -14,7 +14,7 @@ Unlazier is a set of rules that makes these assistants work more carefully. You 
 
 - **One install, nine tools:** Claude Code, Codex CLI, Gemini CLI, Devin, Kiro, Cline, OpenCode, Amp, and GitHub Copilot CLI, on Linux, macOS, and Windows.
 - **Rules that stay in force:** in every tool that allows it, a short reminder repeats them with each message, so long sessions do not drift.
-- **Paced by your usage limits:** the assistant works in parallel when there is room and slows down near your 5-hour and weekly limits. In Claude Code and Codex CLI, a hook blocks new helper agents when usage is high.
+- **Paced by your usage limits:** the assistant works in parallel when there is room and slows down as your 5-hour and weekly windows fill. In Claude Code, it then waits for the reset on its own and picks the work back up, and hooks enforce each step.
 - **Sound alerts:** three beeps when the assistant needs you or finishes its turn.
 - **Safe to try:** it adds to your settings instead of replacing them, and the uninstaller removes only what it added.
 
@@ -41,8 +41,8 @@ Unlazier adds four layers to each tool. Every tool gets the same four layers; on
 | Layer | What it does | Why it matters |
 |-------|--------------|----------------|
 | **1. Rules** | Adds the rules to the tool's rules folder, one small file per rule, or to its global instructions file when the tool has no rules folder. The assistant reads them at the start of every session. | The assistant knows what is expected from the first message. |
-| **2. Reminder** | Sends a short summary of the rules again with each of your messages, and the core principles again after the conversation is compacted. When the project has its own rules file (`CLAUDE.md`, `AGENTS.md` or `GEMINI.md`), it also names that file and its sections. | In long sessions, instructions from the start lose weight as the conversation grows. The reminder keeps them fresh. |
-| **3. Usage** | Adds a line to the reminder saying how much of your 5-hour and weekly usage limits is used. | The assistant can run tasks in parallel when there is room, and slow down before you hit a limit. |
+| **2. Reminder** | Sends a short summary of the rules again with each of your messages, and the core principles again after the conversation is compacted (Claude Code reloads the rule files itself, so there only the summary comes back). When the project has its own rules file (`CLAUDE.md`, `AGENTS.md` or `GEMINI.md`), it also names that file and its sections. | In long sessions, instructions from the start lose weight as the conversation grows. The reminder keeps them fresh. |
+| **3. Usage** | Adds a line to the reminder saying how much of your 5-hour and weekly usage limits is used, and which usage band applies. | The assistant can run tasks in parallel when there is room, slow down before you hit a limit, and in Claude Code wait for the reset and continue. |
 | **4. Alerts** | Plays three short beeps when the assistant asks for your permission, asks you a question, or finishes its turn. | You can look away while it works and come back when it needs you. |
 
 ## Supported Tools
@@ -167,22 +167,28 @@ If you moved a tool's settings with its own environment variable (`CLAUDE_CONFIG
 
 ## Usage Limits and Parallel Work
 
-Subscriptions such as Claude and ChatGPT limit how much you can use in a 5-hour window and in a week. Unlazier tells the assistant how to pace itself:
+Subscriptions such as Claude and ChatGPT limit how much you can use in a 5-hour window and in a week. Unlazier places each window in one of four bands, and the stricter of the two sets how the assistant works:
 
-| 5-hour window | What the assistant does |
-|---------------|-------------------------|
-| below 70% | Runs as much work in parallel as it can |
-| 70% to 85% | Runs at most 2 tasks at a time |
-| 85% to 95% | Works on one task at a time, without helper agents |
-| 95% or more | Works on one task at a time, in small steps that each leave the work consistent; at the limit, see below |
+| Band | 5-hour window | Weekly window | What the assistant does |
+|------|---------------|---------------|-------------------------|
+| 1 | up to 70% | up to 90% | Runs as much work in parallel as it can |
+| 2 | up to 85% | up to 95% | Starts a new helper agent only while fewer than 2 are running |
+| 3 | up to 95% | up to 98% | Works on its own, without helper agents |
+| 4 | above 95% | above 98% | Starts nothing new; helper agents still running wrap up at a consistent point and report; then it waits for the reset |
 
-When the **weekly** window reaches 99%, the assistant finishes the current step, tells you, and waits.
+Helper agents started in an earlier band keep running until they finish. Without a usage reading, band 2 applies. In bands 1 to 3, usage is never a reason for the assistant to end its turn.
 
-At the **usage limit**, the tool decides what happens. Claude Code v2.1.234 or later can [wait in the open session and continue the task](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset) after a claude.ai subscription limit resets. It is on by default, and you control it with `autoContinueAtUsageLimit` in user settings, `/config`, or `/rate-limit-options` (where you can also start or cancel a wait). So in Claude Code the assistant keeps working until the limit instead of stopping early, and Claude Code then waits and continues, or leaves the next step to you, as you chose. Unlazier does not change this setting or run its own waiter; the installer only tells you when it is off. Codex CLI has no such wait, but it [lets the turn in progress go on past the limit](https://learn.chatgpt.com/docs/pricing), so there the assistant also keeps working; Codex then stops, and you continue after the reset. The other tools offer neither, so there the assistant finishes the current step, tells you, and waits.
+**Waiting for the reset (Claude Code):** in band 4, the assistant starts the Unlazier waiter in the background and ends its turn. The waiter works out when the full window resets, sleeps once until 3 minutes after that, and then wakes the session, which picks the plan back up. It needs no Claude Code setting (Unlazier does not use `autoContinueAtUsageLimit` or `/rate-limit-options`), but the session must stay open and the computer awake: a suspended computer wakes the session late, and closing the terminal ends the wait. In `claude -p` runs, Claude Code stops background commands after 30 minutes by default, so the wait does not work there. The other tools cannot wake a session, so there the assistant finishes the current step, tells you, and waits for you.
 
-In **Claude Code** and **Codex CLI**, part of the ladder is enforced, not only asked for: while the 5-hour window is at 85% or more, or the weekly window at 99% or more, a hook blocks every new helper agent and tells the assistant to continue on its own (or to pause, for the weekly window). Below those levels the hook stays silent and costs nothing.
+**Enforced, not only asked for (Claude Code):** hooks keep the bands without relying on the assistant's memory.
 
-When it parallelizes, it prefers, in this order: helper agents for parts of the same task, then different tasks of the same request, then different requests.
+- A hook on helper agents blocks the ones the band does not allow, counting the ones still running.
+- A hook after every tool call, in the assistant and in its helper agents, adds the usage line when the band changes and tells helper agents to wrap up in band 4. It prints nothing otherwise, so it costs no tokens.
+- A hook at the end of the turn keeps band 4 from ending without the waiter, and holds the turn once when the assistant tries to end it over usage in bands 2 and 3.
+
+In Codex CLI, the hook on helper agents blocks them in bands 3 and 4.
+
+When it parallelizes, it prefers, in this order and only between tasks that do not conflict: helper agents for parts of the same task, then different tasks of the same request, then different requests.
 
 **Where the numbers come from:**
 
@@ -199,11 +205,11 @@ When it parallelizes, it prefers, in this order: helper agents for parts of the 
     {"captured_at": 1794668291, "five_hour": {"used_percentage": 24, "resets_at": 1794683400}, "seven_day": {"used_percentage": 60, "resets_at": 1794978000}}
     ```
 
-    `captured_at` is the current time in seconds. Usage data is available only on Claude subscription plans, not with an API key. The usage line also follows each subagent call, so the assistant sees usage climb during a long turn.
+    `captured_at` is the current time in seconds. Usage data is available only on Claude subscription plans, not with an API key. The usage line also follows any tool call that changes the band, so the assistant sees usage climb during a long turn.
 - **Codex CLI** writes usage into its own session log, which the reminder reads. Nothing to set up. The usage line also follows each subagent call.
-- **Other tools** do not expose usage, so the reminder says `Usage: unknown`. The assistant then runs at most 2 to 3 tasks at a time and asks you before running more than 5.
+- **Other tools** do not expose usage, so the reminder says `Usage: unknown`, and band 2 applies.
 
-A reading older than 15 minutes counts as unknown.
+A reading older than 15 minutes counts as unknown. A window whose reset time has passed counts as 0% until the next reading.
 
 ## Sound Alerts
 
@@ -307,7 +313,7 @@ The topic rules in [`rules/`](rules/) add detail, each with a bad and a good exa
 | [`async.md`](rules/async.md) | Handling asynchronous work and cleanup |
 | [`naming.md`](rules/naming.md) | Clear names that follow each language's conventions |
 | [`documentation.md`](rules/documentation.md) | Comments that explain why, plus run instructions |
-| [`parallelism.md`](rules/parallelism.md) | Pacing parallel work by usage limits |
+| [`parallelism.md`](rules/parallelism.md) | Pacing parallel work by usage limits, and what to delegate |
 
 The reminder that is sent with every message is in [`reminder.md`](reminder.md).
 
@@ -325,7 +331,7 @@ Repository layout:
 |------|---------|
 | `AGENTS.md`, `rules/` | The rules (layer 1). `CLAUDE.md` links to `AGENTS.md`. |
 | `reminder.md` | The short reminder (layer 2). |
-| `hooks/inject.sh`, `hooks/inject.ps1` | Prints the reminder and the usage line (layers 2 and 3) in the format each tool expects; in Claude Code and Codex CLI, also blocks new helper agents when usage is high. |
+| `hooks/inject.sh`, `hooks/inject.ps1` | Prints the reminder and the usage line (layers 2 and 3) in the format each tool expects; in Claude Code and Codex CLI, also blocks helper agents the usage band does not allow, and in Claude Code keeps the band hooks and runs the waiter. |
 | `hooks/alert.sh`, `hooks/alert.ps1` | Plays the alert beeps (layer 4). |
 | `statusline/` | Claude Code status line that saves usage for the reminder. |
 | `plugins/` | OpenCode and Amp plugins, which call the same hook script. |

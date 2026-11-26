@@ -16,7 +16,7 @@ O Unlazier é um conjunto de regras que faz esses assistentes trabalharem com ma
 
 - **Uma instalação, nove ferramentas:** Claude Code, Codex CLI, Gemini CLI, Devin, Kiro, Cline, OpenCode, Amp e GitHub Copilot CLI, no Linux, no macOS e no Windows.
 - **Regras que continuam valendo:** em toda ferramenta que permite, um lembrete curto as repete a cada mensagem, para que sessões longas não se desviem.
-- **Ritmo de acordo com os seus limites de uso:** o assistente trabalha em paralelo quando há folga e desacelera perto dos limites de 5 horas e semanal. No Claude Code e no Codex CLI, um hook bloqueia novos agentes auxiliares quando o uso está alto.
+- **Ritmo de acordo com os seus limites de uso:** o assistente trabalha em paralelo quando há folga e desacelera à medida que as suas janelas de 5 horas e semanal vão enchendo. No Claude Code, ele então espera sozinho pelo reinício e retoma o trabalho, e hooks impõem cada etapa.
 - **Alertas sonoros:** três bipes quando o assistente precisa de você ou termina a vez dele.
 - **Seguro para testar:** ele acrescenta às suas configurações em vez de substituí-las, e o desinstalador remove só o que adicionou.
 
@@ -43,8 +43,8 @@ O Unlazier adiciona quatro camadas a cada ferramenta. Todas as ferramentas receb
 | Camada | O que faz | Por que importa |
 |--------|-----------|-----------------|
 | **1. Regras** | Coloca as regras na pasta de regras da ferramenta, um arquivo pequeno por regra, ou no arquivo de instruções globais quando a ferramenta não tem pasta de regras. O assistente as lê no início de cada sessão. | O assistente sabe o que se espera dele desde a primeira mensagem. |
-| **2. Lembrete** | Reenvia um resumo curto das regras a cada mensagem sua, e os princípios principais de novo depois que a conversa é compactada. Quando o projeto tem o próprio arquivo de regras (`CLAUDE.md`, `AGENTS.md` ou `GEMINI.md`), também cita esse arquivo e as seções dele. | Em sessões longas, as instruções do início perdem peso conforme a conversa cresce. O lembrete mantém as regras frescas. |
-| **3. Uso** | Acrescenta ao lembrete uma linha dizendo quanto dos seus limites de uso de 5 horas e semanal já foi consumido. | O assistente pode rodar tarefas em paralelo quando há folga e desacelerar antes de você atingir um limite. |
+| **2. Lembrete** | Reenvia um resumo curto das regras a cada mensagem sua, e os princípios principais de novo depois que a conversa é compactada (o Claude Code recarrega os arquivos de regras sozinho, então nele só o resumo volta). Quando o projeto tem o próprio arquivo de regras (`CLAUDE.md`, `AGENTS.md` ou `GEMINI.md`), também cita esse arquivo e as seções dele. | Em sessões longas, as instruções do início perdem peso conforme a conversa cresce. O lembrete mantém as regras frescas. |
+| **3. Uso** | Acrescenta ao lembrete uma linha dizendo quanto dos seus limites de uso de 5 horas e semanal já foi consumido, e qual faixa de uso se aplica. | O assistente pode rodar tarefas em paralelo quando há folga, desacelerar antes de você atingir um limite e, no Claude Code, esperar o reinício e continuar. |
 | **4. Alertas** | Toca três bipes curtos quando o assistente pede sua permissão, faz uma pergunta ou termina a vez dele. | Você pode fazer outra coisa enquanto ele trabalha e voltar quando ele precisar de você. |
 
 ## Ferramentas suportadas
@@ -169,22 +169,28 @@ Se você mudou o lugar das configurações de uma ferramenta com a variável de 
 
 ## Limites de uso e trabalho em paralelo
 
-Assinaturas como as do Claude e do ChatGPT limitam quanto você pode usar numa janela de 5 horas e numa semana. O Unlazier diz ao assistente como dosar o ritmo:
+Assinaturas como as do Claude e do ChatGPT limitam quanto você pode usar numa janela de 5 horas e numa semana. O Unlazier coloca cada janela numa de quatro faixas, e a mais restritiva das duas define como o assistente trabalha:
 
-| Janela de 5 horas | O que o assistente faz |
-|-------------------|------------------------|
-| abaixo de 70% | Roda em paralelo o máximo de trabalho que conseguir |
-| de 70% a 85% | Roda no máximo 2 tarefas ao mesmo tempo |
-| de 85% a 95% | Trabalha numa tarefa por vez, sem agentes auxiliares |
-| 95% ou mais | Trabalha numa tarefa por vez, em passos pequenos que deixam o trabalho consistente; no limite, veja abaixo |
+| Faixa | Janela de 5 horas | Janela semanal | O que o assistente faz |
+|-------|-------------------|----------------|------------------------|
+| 1 | até 70% | até 90% | Roda em paralelo o máximo de trabalho que conseguir |
+| 2 | até 85% | até 95% | Só inicia um novo agente auxiliar enquanto houver menos de 2 rodando |
+| 3 | até 95% | até 98% | Trabalha sozinho, sem agentes auxiliares |
+| 4 | acima de 95% | acima de 98% | Não inicia nada novo; os agentes auxiliares ainda em execução encerram num ponto consistente e reportam; depois ele espera o reinício |
 
-Quando a janela **semanal** chega a 99%, o assistente termina o passo atual, avisa você e espera.
+Agentes auxiliares iniciados numa faixa anterior continuam rodando até terminar. Sem uma leitura de uso, vale a faixa 2. Nas faixas 1 a 3, o uso nunca é motivo para o assistente encerrar o turno.
 
-No **limite de uso**, quem decide é a ferramenta. O Claude Code v2.1.234 ou mais recente pode [esperar na sessão aberta e continuar a tarefa](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset) após o reinício de um limite da assinatura claude.ai. Isso vem ligado por padrão, e você controla com `autoContinueAtUsageLimit` nas configurações de usuário, no `/config` ou no `/rate-limit-options` (onde também pode iniciar ou cancelar uma espera). Por isso, no Claude Code o assistente continua trabalhando até o limite em vez de parar antes, e o Claude Code então espera e continua, ou deixa o próximo passo com você, conforme a sua escolha. O Unlazier não altera essa configuração nem inicia uma espera própria; o instalador só avisa quando ela está desligada. O Codex CLI não tem essa espera, mas [deixa o turno em andamento seguir além do limite](https://learn.chatgpt.com/docs/pricing), então nele o assistente também continua trabalhando; depois o Codex para, e você continua após o reinício. As demais ferramentas não oferecem nenhuma das duas coisas, então nelas o assistente termina o passo atual, avisa você e espera.
+**Espera pelo reinício (Claude Code):** na faixa 4, o assistente inicia em segundo plano o processo de espera do Unlazier e encerra o turno. O processo de espera calcula quando a janela cheia reinicia, dorme uma única vez até 3 minutos depois disso e então acorda a sessão, que retoma o plano. Ele não precisa de nenhuma configuração do Claude Code (o Unlazier não usa `autoContinueAtUsageLimit` nem `/rate-limit-options`), mas a sessão precisa continuar aberta e o computador acordado: um computador suspenso acorda a sessão com atraso, e fechar o terminal encerra a espera. Em execuções com `claude -p`, o Claude Code encerra comandos em segundo plano após 30 minutos por padrão, então a espera não funciona nelas. As demais ferramentas não conseguem acordar uma sessão, então nelas o assistente termina o passo atual, avisa você e espera por você.
 
-No **Claude Code** e no **Codex CLI**, parte da escada é imposta, não só pedida: enquanto a janela de 5 horas estiver em 85% ou mais, ou a semanal em 99% ou mais, um hook bloqueia todo novo agente auxiliar e diz ao assistente para continuar sozinho (ou pausar, no caso da janela semanal). Abaixo desses níveis o hook fica em silêncio e não custa nada.
+**Imposto, não só pedido (Claude Code):** hooks mantêm as faixas sem depender da memória do assistente.
 
-Quando paraleliza, ele prefere, nesta ordem: agentes auxiliares para partes da mesma tarefa, depois tarefas diferentes do mesmo pedido, depois pedidos diferentes.
+- Um hook nos agentes auxiliares bloqueia os que a faixa não permite, contando os que ainda estão rodando.
+- Um hook após cada chamada de ferramenta, no assistente e nos agentes auxiliares dele, acrescenta a linha de uso quando a faixa muda e, na faixa 4, diz aos agentes auxiliares para encerrar. Fora isso, ele não imprime nada, então não gasta tokens.
+- Um hook no fim do turno impede que a faixa 4 termine sem o processo de espera e segura o turno uma vez quando o assistente tenta encerrá-lo por causa do uso nas faixas 2 e 3.
+
+No Codex CLI, o hook nos agentes auxiliares os bloqueia nas faixas 3 e 4.
+
+Quando paraleliza, ele prefere, nesta ordem e só entre tarefas que não entram em conflito: agentes auxiliares para partes da mesma tarefa, depois tarefas diferentes do mesmo pedido, depois pedidos diferentes.
 
 **De onde vêm os números:**
 
@@ -201,11 +207,11 @@ Quando paraleliza, ele prefere, nesta ordem: agentes auxiliares para partes da m
     {"captured_at": 1794668291, "five_hour": {"used_percentage": 24, "resets_at": 1794683400}, "seven_day": {"used_percentage": 60, "resets_at": 1794978000}}
     ```
 
-    `captured_at` é o horário atual em segundos. Os dados de uso só existem nos planos de assinatura do Claude, não com chave de API. A linha de uso também chega após cada chamada de subagente, então o assistente vê o uso subir durante um turno longo.
+    `captured_at` é o horário atual em segundos. Os dados de uso só existem nos planos de assinatura do Claude, não com chave de API. A linha de uso também chega após qualquer chamada de ferramenta que mude a faixa, então o assistente vê o uso subir durante um turno longo.
 - **Codex CLI** grava o uso no próprio log de sessão, que o lembrete lê. Não é preciso configurar nada. A linha de uso também chega após cada chamada de subagente.
-- **As outras ferramentas** não expõem o uso, então o lembrete diz `Usage: unknown`. Nesse caso, o assistente roda no máximo 2 a 3 tarefas ao mesmo tempo e pergunta a você antes de rodar mais de 5.
+- **As outras ferramentas** não expõem o uso, então o lembrete diz `Usage: unknown`, e vale a faixa 2.
 
-Uma leitura com mais de 15 minutos conta como desconhecida.
+Uma leitura com mais de 15 minutos conta como desconhecida. Uma janela cujo horário de reinício já passou conta como 0% até a próxima leitura.
 
 ## Alertas sonoros
 
@@ -309,7 +315,7 @@ As regras por tema em [`rules/`](rules/) trazem mais detalhes, cada uma com um e
 | [`async.md`](rules/async.md) | Lidar com trabalho assíncrono e com a liberação de recursos |
 | [`naming.md`](rules/naming.md) | Nomes claros, que seguem as convenções de cada linguagem |
 | [`documentation.md`](rules/documentation.md) | Comentários que explicam o porquê, e instruções de execução |
-| [`parallelism.md`](rules/parallelism.md) | Dosar o trabalho em paralelo pelos limites de uso |
+| [`parallelism.md`](rules/parallelism.md) | Dosar o trabalho em paralelo pelos limites de uso, e o que delegar |
 
 O lembrete enviado a cada mensagem está em [`reminder.md`](reminder.md).
 
@@ -327,7 +333,7 @@ Organização do repositório:
 |---------|--------|
 | `AGENTS.md`, `rules/` | As regras (camada 1). `CLAUDE.md` é um link para `AGENTS.md`. |
 | `reminder.md` | O lembrete curto (camada 2). |
-| `hooks/inject.sh`, `hooks/inject.ps1` | Imprime o lembrete e a linha de uso (camadas 2 e 3) no formato que cada ferramenta espera; no Claude Code e no Codex CLI, também bloqueia novos agentes auxiliares quando o uso está alto. |
+| `hooks/inject.sh`, `hooks/inject.ps1` | Imprime o lembrete e a linha de uso (camadas 2 e 3) no formato que cada ferramenta espera; no Claude Code e no Codex CLI, também bloqueia os agentes auxiliares que a faixa de uso não permite, e no Claude Code mantém os hooks das faixas e roda o processo de espera. |
 | `hooks/alert.sh`, `hooks/alert.ps1` | Toca os bipes de alerta (camada 4). |
 | `statusline/` | Status line do Claude Code que salva o uso para o lembrete. |
 | `plugins/` | Plugins do OpenCode e do Amp, que chamam o mesmo script de hook. |

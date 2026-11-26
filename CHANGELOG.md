@@ -2,6 +2,28 @@
 
 All notable changes to Unlazier (called Unlazier AI before version 2.1) are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Usage bands with a wait for the reset (Claude Code):** the stricter of the two windows sets one of four bands: band 1 (5-hour window up to 70%, weekly up to 90%) runs as much in parallel as it can; band 2 (up to 85% / 95%) starts a helper agent only while fewer than 2 are running; band 3 (up to 95% / 98%) works without helper agents; band 4 starts nothing new, has the running helper agents wrap up at a consistent point and report, and then starts the Unlazier waiter in the background. The waiter sleeps once until the full window resets plus 3 minutes and wakes the session, which picks the plan back up. It needs no Claude Code setting.
+- **Band hooks (Claude Code):** a hook after every tool call, in the assistant and in its helper agents, adds the usage line only when the band changes and tells helper agents to wrap up in band 4; `SubagentStart` and `SubagentStop` hooks count the running helper agents, so the gate can hold band 2 to 2 of them; a `Stop` hook keeps band 4 from ending without the waiter and holds the turn once when the assistant tries to end it over usage in bands 2 and 3. The `Stop` hook acts only on Claude Code sessions, because Devin also runs the hooks in `~/.claude/settings.json`.
+- The parallel-work priority now applies only between tasks that do not conflict.
+- **Delegate by criteria:** the parallelism rule tells the main agent to keep its context small. Within what the band allows, it delegates work that reads or produces much more than it needs to see, and independent tasks; it does small tasks, decisions, questions for you, and the checking of results itself. A project's own rules on delegation and models take precedence.
+
+### Changed
+
+- **Usage ladder replaced by the bands**, for every tool. Without a usage reading, band 2 applies (it was "at most 2 to 3 tasks"). In bands 1 to 3, usage is never a reason to end the turn. Tools that cannot wake a session, Codex CLI included, finish the current step, report, and wait for you in band 4; Codex no longer keeps working until the limit.
+- The usage line ends with the band and what it asks, for example `... (source: Claude Code status line, 0 min old). Band 1: maximum parallelism.`
+- A window whose reset time has passed counts as 0% until the next reading, instead of unknown.
+- The Codex subagent gate follows the bands: it blocks in bands 3 and 4.
+- After a compaction in Claude Code, the hook no longer repeats the core principles, which Claude Code reloads from the rule files on its own; the reminder and the usage line still come back. The other tools are unchanged.
+
+### Removed
+
+- The reliance on Claude Code's `autoContinueAtUsageLimit` and `/rate-limit-options`, and the installer notice about that setting.
+- The Claude Code `PostToolUse` hook on the `Agent` tool, replaced by the hook after every tool call. Installing again removes it.
+
 ## [2.4.2] - 2026-11-24
 
 ### Fixed
