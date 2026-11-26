@@ -271,9 +271,18 @@ function Test-InstallAddsAllLayers {
         @(Get-HookCommands $claudeSettings 'UserPromptSubmit' | Where-Object { $_.Contains('inject.ps1" claude prompt') }).Count -eq 1
     }
     Assert-That 'Claude compaction hook' { @($claudeSettings.hooks.SessionStart | Where-Object { $_.matcher -eq 'compact' }).Count -eq 1 }
-    Assert-That 'Claude subagent usage hook' {
-        @($claudeSettings.hooks.PostToolUse | Where-Object { $_.matcher -eq 'Agent' } | ForEach-Object { $_.hooks } |
-            Where-Object { $_.command.Contains('inject.ps1" claude subagent') }).Count -eq 1
+    Assert-That 'Claude band hook after every tool' {
+        @($claudeSettings.hooks.PostToolUse | Where-Object { $null -eq $_.PSObject.Properties['matcher'] } |
+            ForEach-Object { $_.hooks } | Where-Object { $_.command.Contains('inject.ps1" claude tool') }).Count -eq 1
+    }
+    Assert-That 'Claude stop hook' {
+        @(Get-HookCommands $claudeSettings 'Stop' | Where-Object { $_.Contains('inject.ps1" claude stop') }).Count -eq 1
+    }
+    Assert-That 'Claude subagent start hook' {
+        @(Get-HookCommands $claudeSettings 'SubagentStart' | Where-Object { $_.Contains('inject.ps1" claude agent-start') }).Count -eq 1
+    }
+    Assert-That 'Claude subagent stop hook' {
+        @(Get-HookCommands $claudeSettings 'SubagentStop' | Where-Object { $_.Contains('inject.ps1" claude agent-stop') }).Count -eq 1
     }
     Assert-That 'Claude subagent gate hook' {
         @($claudeSettings.hooks.PreToolUse | Where-Object { $_.matcher -eq 'Agent' } | ForEach-Object { $_.hooks } |
@@ -403,8 +412,20 @@ function Test-ReinstallIsIdempotent {
         @(Get-HookCommands (Read-TestJson (Join-TestPath $testHome '.claude/settings.json')) 'UserPromptSubmit' |
             Where-Object { $_.Contains('unlazier') }).Count -eq 1
     }
-    Assert-That 'one Claude subagent usage hook' {
+    Assert-That 'one Claude band hook' {
         @(Get-HookCommands (Read-TestJson (Join-TestPath $testHome '.claude/settings.json')) 'PostToolUse' |
+            Where-Object { $_.Contains('unlazier') }).Count -eq 1
+    }
+    Assert-That 'one Claude stop hook next to the alert' {
+        @(Get-HookCommands (Read-TestJson (Join-TestPath $testHome '.claude/settings.json')) 'Stop' |
+            Where-Object { $_.Contains('inject.ps1" claude stop') }).Count -eq 1
+    }
+    Assert-That 'one Claude subagent start hook' {
+        @(Get-HookCommands (Read-TestJson (Join-TestPath $testHome '.claude/settings.json')) 'SubagentStart' |
+            Where-Object { $_.Contains('unlazier') }).Count -eq 1
+    }
+    Assert-That 'one Claude subagent stop hook' {
+        @(Get-HookCommands (Read-TestJson (Join-TestPath $testHome '.claude/settings.json')) 'SubagentStop' |
             Where-Object { $_.Contains('unlazier') }).Count -eq 1
     }
     Assert-That 'one Claude subagent gate hook' {
@@ -782,37 +803,32 @@ function Test-InjectUsageLines {
     })
     Write-CodexRollouts $testHome $now
 
-    Assert-That 'Claude usage line' {
-        (Get-LastLine (Invoke-Inject $testHome '.claude' 'claude' 'prompt')) -eq 'Usage: 5h 24% | weekly unknown (source: Claude Code status line, 2 min old)'
-    }
-    Assert-That 'Claude subagent context is only the usage line' {
-        $output = (ConvertFrom-OutputJson (Invoke-Inject $testHome '.claude' 'claude' 'subagent')).hookSpecificOutput
-        $output.hookEventName -eq 'PostToolUse' -and
-            $output.additionalContext -eq 'Usage: 5h 24% | weekly unknown (source: Claude Code status line, 2 min old)'
+    Assert-That 'Claude usage line, with a passed reset as 0%' {
+        (Get-LastLine (Invoke-Inject $testHome '.claude' 'claude' 'prompt')) -eq 'Usage: 5h 24% | weekly 0% (source: Claude Code status line, 2 min old). Band 1: maximum parallelism.'
     }
     Assert-That 'Codex usage line' {
-        (Get-LastLine (Invoke-Inject $testHome '.codex' 'codex' 'prompt')) -eq 'Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old)'
+        (Get-LastLine (Invoke-Inject $testHome '.codex' 'codex' 'prompt')) -eq 'Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old). Band 1: maximum parallelism.'
     }
     Assert-That 'Codex subagent context is only the usage line' {
         $output = (ConvertFrom-OutputJson (Invoke-Inject $testHome '.codex' 'codex' 'subagent')).hookSpecificOutput
         $output.hookEventName -eq 'PostToolUse' -and
-            $output.additionalContext -eq 'Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old)'
+            $output.additionalContext -eq 'Usage: 5h 43% | weekly 61% (source: Codex session log, 1 min old). Band 1: maximum parallelism.'
     }
-    Assert-That 'Kiro usage unknown' {
-        (Get-LastLine (Invoke-Inject $testHome '.kiro' 'kiro' 'prompt')) -eq 'Usage: unknown (this tool does not expose usage windows)'
+    Assert-That 'Kiro usage unknown is band 2' {
+        (Get-LastLine (Invoke-Inject $testHome '.kiro' 'kiro' 'prompt')) -eq 'Usage: unknown (this tool does not expose usage windows). Band 2: start a subagent only while fewer than 2 are running.'
     }
 
     $state = Read-TestJson $stateFile
     $state.captured_at = $now - 3600
     Write-TestJson $stateFile $state
     Assert-That 'stale Claude reading is unknown' {
-        (Get-LastLine (Invoke-Inject $testHome '.claude' 'claude' 'prompt')) -eq 'Usage: unknown (no usage reading from the last 15 minutes)'
+        (Get-LastLine (Invoke-Inject $testHome '.claude' 'claude' 'prompt')) -eq 'Usage: unknown (no usage reading from the last 15 minutes). Band 2: start a subagent only while fewer than 2 are running.'
     }
 
     $state.captured_at = $now * 1000
     Write-TestJson $stateFile $state
     Assert-That 'a reading from the future (milliseconds) is unknown' {
-        (Get-LastLine (Invoke-Inject $testHome '.claude' 'claude' 'prompt')) -eq 'Usage: unknown (no usage reading from the last 15 minutes)'
+        (Get-LastLine (Invoke-Inject $testHome '.claude' 'claude' 'prompt')) -eq 'Usage: unknown (no usage reading from the last 15 minutes). Band 2: start a subagent only while fewer than 2 are running.'
     }
 }
 
@@ -837,12 +853,12 @@ function Test-InjectCodexDamagedLog {
         $readings[2], $cut)
     Write-TestFile (Join-TestPath $testHome '.codex/sessions/2026/11/14/rollout-2026-11-14T10-00-00-b.jsonl') ($lines -join "`n")
     Assert-That 'broken lines before the reading and a half-written last line are skipped' {
-        (Get-LastLine (Invoke-Inject $testHome '.codex' 'codex' 'prompt')) -eq 'Usage: 5h 42% | weekly unknown (source: Codex session log, 1 min old)'
+        (Get-LastLine (Invoke-Inject $testHome '.codex' 'codex' 'prompt')) -eq 'Usage: 5h 42% | weekly unknown (source: Codex session log, 1 min old). Band 2: start a subagent only while fewer than 2 are running.'
     }
 }
 
 # A damaged reading must degrade to the expected usage line: the prompt keeps its reminder and
-# exits 0, the subagent event still reports usage, and the gate allows the call.
+# exits 0, the Codex subagent event still reports usage, and the gate allows the call.
 function Assert-DegradedUsage {
     param([string]$TestHome, [string]$PayloadDirectory, [string]$Harness, [string]$Description, [string]$Expected)
     $prompt = Invoke-Inject $TestHome $PayloadDirectory $Harness 'prompt'
@@ -850,8 +866,10 @@ function Assert-DegradedUsage {
         $prompt.ExitCode -eq 0 -and $prompt.Lines[0] -eq 'Unlazier rules are active for this session.'
     }
     Assert-That "${Description}: usage line" { (Get-LastLine $prompt) -eq $Expected }
-    Assert-That "${Description}: the subagent event reports it" {
-        (ConvertFrom-OutputJson (Invoke-Inject $TestHome $PayloadDirectory $Harness 'subagent')).hookSpecificOutput.additionalContext -eq $Expected
+    if ($Harness -eq 'codex') {
+        Assert-That "${Description}: the subagent event reports it" {
+            (ConvertFrom-OutputJson (Invoke-Inject $TestHome $PayloadDirectory $Harness 'subagent')).hookSpecificOutput.additionalContext -eq $Expected
+        }
     }
     Assert-That "${Description}: the gate allows silently" {
         $result = Invoke-Inject $TestHome $PayloadDirectory $Harness 'dispatch'
@@ -870,10 +888,11 @@ function Test-InjectMalformedUsage {
         captured_at = 'oops'
         five_hour = [pscustomobject]@{ used_percentage = 40; resets_at = $now + 3600 }
     })
-    Assert-DegradedUsage $testHome '.claude' 'claude' 'captured_at as a string' 'Usage: unknown (no usage reading from the last 15 minutes)'
-    Assert-That 'captured_at as a string: compaction exits 0 with the principles' {
+    Assert-DegradedUsage $testHome '.claude' 'claude' 'captured_at as a string' `
+        'Usage: unknown (no usage reading from the last 15 minutes). Band 2: start a subagent only while fewer than 2 are running.'
+    Assert-That 'captured_at as a string: compaction exits 0 with the reminder' {
         $result = Invoke-Inject $testHome '.claude' 'claude' 'compact'
-        $result.ExitCode -eq 0 -and $result.Lines[0] -eq '# Global Agent Rules'
+        $result.ExitCode -eq 0 -and $result.Lines[0] -eq 'Unlazier rules are active for this session.'
     }
     Write-TestJson $stateFile ([pscustomobject]@{
         captured_at = $now
@@ -881,18 +900,18 @@ function Test-InjectMalformedUsage {
         seven_day = [pscustomobject]@{ used_percentage = 61.2; resets_at = 'oops' }
     })
     Assert-DegradedUsage $testHome '.claude' 'claude' 'percentages and reset times as strings' `
-        'Usage: 5h unknown | weekly 61% (source: Claude Code status line, 0 min old)'
+        'Usage: 5h unknown | weekly 61% (source: Claude Code status line, 0 min old). Band 2: start a subagent only while fewer than 2 are running.'
     Write-TestJson $stateFile @([pscustomobject]@{
         captured_at = $now
         five_hour = [pscustomobject]@{ used_percentage = 40; resets_at = $now + 3600 }
     })
-    Assert-DegradedUsage $testHome '.claude' 'claude' 'a JSON array' 'Usage: unknown (no usage reading available)'
+    Assert-DegradedUsage $testHome '.claude' 'claude' 'a JSON array' 'Usage: unknown (no usage reading available). Band 2: start a subagent only while fewer than 2 are running.'
     Write-TestFile $stateFile "{`"captured_at`":$now,"
-    Assert-DegradedUsage $testHome '.claude' 'claude' 'invalid JSON' 'Usage: unknown (no usage reading available)'
+    Assert-DegradedUsage $testHome '.claude' 'claude' 'invalid JSON' 'Usage: unknown (no usage reading available). Band 2: start a subagent only while fewer than 2 are running.'
     Write-TestFile $stateFile ''
-    Assert-DegradedUsage $testHome '.claude' 'claude' 'an empty file' 'Usage: unknown (no usage reading available)'
+    Assert-DegradedUsage $testHome '.claude' 'claude' 'an empty file' 'Usage: unknown (no usage reading available). Band 2: start a subagent only while fewer than 2 are running.'
     Write-TestFile $stateFile "{`"captured_at`":$now}`n{`"captured_at`":$now}`n"
-    Assert-DegradedUsage $testHome '.claude' 'claude' 'two JSON documents' 'Usage: unknown (no usage reading available)'
+    Assert-DegradedUsage $testHome '.claude' 'claude' 'two JSON documents' 'Usage: unknown (no usage reading available). Band 2: start a subagent only while fewer than 2 are running.'
 
     $reading = [pscustomobject]@{
         timestamp = [System.DateTimeOffset]::FromUnixTimeSeconds($now - 60).UtcDateTime.ToString(
@@ -905,7 +924,7 @@ function Test-InjectMalformedUsage {
     Write-TestFile (Join-TestPath $testHome '.codex/sessions/2026/11/14/rollout-2026-11-14T10-00-00-b.jsonl') (
         (ConvertTo-Json -InputObject $reading -Depth 10 -Compress) + "`n")
     Assert-DegradedUsage $testHome '.codex' 'codex' 'Codex percentages and reset times as strings' `
-        'Usage: 5h unknown | weekly 61% (source: Codex session log, 1 min old)'
+        'Usage: 5h unknown | weekly 61% (source: Codex session log, 1 min old). Band 2: start a subagent only while fewer than 2 are running.'
 }
 
 function ConvertFrom-OutputJson {
@@ -916,13 +935,26 @@ function ConvertFrom-OutputJson {
 function Test-InjectOutputFormats {
     Write-Host 'inject prints the shape each harness expects'
     $testHome = New-TestHome
-    [void](Invoke-Installer $testHome @('-Harness', 'claude,gemini,devin,cline'))
+    [void](Invoke-Installer $testHome @('-Harness', 'claude,codex,kiro,gemini,devin,cline'))
 
     Assert-That 'Claude prompt is the reminder text' {
         (Invoke-Inject $testHome '.claude' 'claude' 'prompt').Lines[0] -eq 'Unlazier rules are active for this session.'
     }
-    Assert-That 'Claude compaction starts with the principles' {
-        (Invoke-Inject $testHome '.claude' 'claude' 'compact').Lines[0] -eq '# Global Agent Rules'
+    $claudeCompaction = Invoke-Inject $testHome '.claude' 'claude' 'compact'
+    Assert-That 'Claude compaction leaves the principles to Claude Code' {
+        @($claudeCompaction.Lines | Where-Object { $_ -eq '# Global Agent Rules' }).Count -eq 0
+    }
+    Assert-That 'Claude compaction brings back the reminder' {
+        $claudeCompaction.Lines[0] -eq 'Unlazier rules are active for this session.'
+    }
+    Assert-That 'Claude compaction brings back the band' {
+        $claudeCompaction.Lines[-1].Contains('. Band ')
+    }
+    Assert-That 'Codex compaction starts with the principles' {
+        (Invoke-Inject $testHome '.codex' 'codex' 'compact').Lines[0] -eq '# Global Agent Rules'
+    }
+    Assert-That 'Kiro compaction starts with the principles' {
+        (Invoke-Inject $testHome '.kiro' 'kiro' 'compact').Lines[0] -eq '# Global Agent Rules'
     }
     Assert-That 'Gemini output is JSON' {
         (ConvertFrom-OutputJson (Invoke-Inject $testHome '.gemini' 'gemini' 'prompt')).hookSpecificOutput.additionalContext.StartsWith('Unlazier rules')
@@ -934,7 +966,11 @@ function Test-InjectOutputFormats {
         (ConvertFrom-OutputJson (Invoke-Inject $testHome 'Documents/Cline' 'cline' 'prompt')).contextModification.StartsWith('Unlazier rules')
     }
     Assert-That 'unknown event fails' { (Invoke-Inject $testHome '.claude' 'claude' 'other').ExitCode -eq 2 }
-    Assert-That 'subagent event fails outside Claude' { (Invoke-Inject $testHome '.gemini' 'gemini' 'subagent').ExitCode -eq 2 }
+    Assert-That 'subagent event fails outside Codex' { (Invoke-Inject $testHome '.gemini' 'gemini' 'subagent').ExitCode -eq 2 }
+    Assert-That 'subagent event fails for Claude, which uses the tool event' {
+        (Invoke-Inject $testHome '.claude' 'claude' 'subagent').ExitCode -eq 2
+    }
+    Assert-That 'band events are only for Claude' { (Invoke-Inject $testHome '.gemini' 'gemini' 'tool').ExitCode -eq 2 }
 }
 
 # Runs inject.ps1 for the harness from the given directory, as the harness does from the project.
@@ -1094,7 +1130,8 @@ function Test-InjectUntrustedProjectRules {
     }
 }
 
-# Writes a fresh Claude usage reading, or one captured the given number of seconds ago.
+# Writes a fresh Claude usage reading with resets in an hour and a day, or one captured the given
+# number of seconds ago.
 function Write-ClaudeUsage {
     param([string]$TestHome, [double]$FiveHour, [double]$Weekly, [int]$AgeSeconds = 0)
     $now = Get-UnixNow
@@ -1105,125 +1142,369 @@ function Write-ClaudeUsage {
     })
 }
 
-function Test-InjectDispatchGate {
-    Write-Host 'the subagent gate blocks only where the usage ladder forbids subagents'
+function Invoke-ClaudeHook {
+    param([string]$TestHome, [string]$EventName, [string]$InputText)
+    return Invoke-Inject $TestHome '.claude' 'claude' $EventName $InputText
+}
+
+function Test-NoOutput {
+    param($Result)
+    return $Result.ExitCode -eq 0 -and @($Result.Lines | Where-Object { $_ -ne '' }).Count -eq 0
+}
+
+function Get-Band {
+    param([string]$TestHome)
+    if ((Get-LastLine (Invoke-Inject $TestHome '.claude' 'claude' 'prompt')) -match '\. Band ([0-9]):') {
+        return $Matches[1]
+    }
+    return ''
+}
+
+function Get-SessionStatePath {
+    param([string]$TestHome)
+    return Join-TestPath $TestHome '.claude/unlazier/state/session-s1.json'
+}
+
+function Test-UsageBands {
+    Write-Host 'the stricter usage window sets the band'
     $testHome = New-TestHome
     $now = Get-UnixNow
-    [void](Invoke-Installer $testHome @('-Harness', 'claude,codex,gemini'))
+    [void](Invoke-Installer $testHome @('-Harness', 'claude,codex'))
 
-    Write-ClaudeUsage $testHome 84.4 40
-    Assert-That 'below 85% the gate allows silently' {
-        $result = Invoke-Inject $testHome '.claude' 'claude' 'dispatch'
-        $result.ExitCode -eq 0 -and @($result.Lines | Where-Object { $_ -ne '' }).Count -eq 0
+    $cases = @(
+        @('5h 70% is band 1', 70.4, 10, '1'), @('5h 71% is band 2', 70.6, 10, '2'), @('5h 85% is band 2', 85, 10, '2'),
+        @('5h 86% is band 3', 86, 10, '3'), @('5h 95% is band 3', 95, 10, '3'), @('5h 96% is band 4', 96, 10, '4'),
+        @('weekly 90% is band 1', 10, 90, '1'), @('weekly 91% is band 2', 10, 91, '2'), @('weekly 96% is band 3', 10, 96, '3'),
+        @('weekly 98% is band 3', 10, 98, '3'), @('weekly 99% is band 4', 10, 99, '4'), @('the stricter window wins', 72, 96, '3'))
+    foreach ($case in $cases) {
+        Write-ClaudeUsage $testHome $case[1] $case[2]
+        Assert-That $case[0] { (Get-Band $testHome) -eq $case[3] }
     }
-    Write-ClaudeUsage $testHome 84.6 40
-    Assert-That '85% after rounding is denied' {
-        $output = (ConvertFrom-OutputJson (Invoke-Inject $testHome '.claude' 'claude' 'dispatch')).hookSpecificOutput
-        $output.hookEventName -eq 'PreToolUse' -and $output.permissionDecision -eq 'deny' -and
-            $output.permissionDecisionReason.StartsWith('Usage: 5h 85%') -and
-            $output.permissionDecisionReason.Contains('continue the work sequentially')
+    Write-ClaudeUsage $testHome 96 10
+    Assert-That 'Claude band 4 names the waiter' {
+        (Get-LastLine (Invoke-Inject $testHome '.claude' 'claude' 'prompt')).Contains(
+            'Band 4: start nothing new; running subagents wrap up, then start the waiter and end the turn.')
     }
-    Write-ClaudeUsage $testHome 10 99
-    Assert-That 'weekly 99% is denied with a pause' {
-        (ConvertFrom-OutputJson (Invoke-Inject $testHome '.claude' 'claude' 'dispatch')).hookSpecificOutput.permissionDecisionReason.Contains('weekly window is at 99% or more')
-    }
-    Write-ClaudeUsage $testHome 96 40 3600
-    Assert-That 'a stale reading never blocks' {
-        @((Invoke-Inject $testHome '.claude' 'claude' 'dispatch').Lines | Where-Object { $_ -ne '' }).Count -eq 0
-    }
-    Write-ClaudeUsage $testHome 96 40 -600
-    Assert-That 'a reading from the future never blocks' {
-        @((Invoke-Inject $testHome '.claude' 'claude' 'dispatch').Lines | Where-Object { $_ -ne '' }).Count -eq 0
-    }
-    Write-ClaudeUsage $testHome 96 40 -60
-    Assert-That 'a reading a minute ahead still counts' {
-        (ConvertFrom-OutputJson (Invoke-Inject $testHome '.claude' 'claude' 'dispatch')).hookSpecificOutput.permissionDecision -eq 'deny'
+    Assert-That 'a band 4 prompt gives the waiter command of its session' {
+        (Get-LastLine (Invoke-ClaudeHook $testHome 'prompt' '{"session_id":"s1"}')).Contains('inject.ps1" claude wait s1')
     }
     Remove-Item -LiteralPath (Join-TestPath $testHome '.claude/state/rate_limits.json') -Force
-    Assert-That 'a missing reading never blocks' {
-        @((Invoke-Inject $testHome '.claude' 'claude' 'dispatch').Lines | Where-Object { $_ -ne '' }).Count -eq 0
-    }
+    Assert-That 'no reading is band 2' { (Get-Band $testHome) -eq '2' }
 
-    Write-CodexRollouts $testHome $now
-    Assert-That 'Codex at 43% allows silently' {
-        @((Invoke-Inject $testHome '.codex' 'codex' 'dispatch').Lines | Where-Object { $_ -ne '' }).Count -eq 0
-    }
-    $timestamp = [System.DateTimeOffset]::FromUnixTimeSeconds($now).UtcDateTime.ToString(
-        "yyyy-MM-dd'T'HH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
-    $highUsage = [pscustomobject]@{
-        timestamp = $timestamp; type = 'event_msg'
+    $fullUsage = [pscustomobject]@{
+        timestamp = [System.DateTimeOffset]::FromUnixTimeSeconds($now).UtcDateTime.ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
+        type = 'event_msg'
         payload = [pscustomobject]@{ type = 'token_count'; rate_limits = [pscustomobject]@{
-            primary = [pscustomobject]@{ used_percent = 90; window_minutes = 300; resets_at = $now + 999 } } }
+            primary = [pscustomobject]@{ used_percent = 96; window_minutes = 300; resets_at = $now + 999 } } }
     }
     Write-TestFile (Join-TestPath $testHome '.codex/sessions/2026/11/15/rollout-2026-11-15T10-00-00-c.jsonl') (
-        (ConvertTo-Json -InputObject $highUsage -Depth 10 -Compress) + "`n")
-    Assert-That 'Codex at 90% is denied' {
-        $output = (ConvertFrom-OutputJson (Invoke-Inject $testHome '.codex' 'codex' 'dispatch')).hookSpecificOutput
-        $output.permissionDecision -eq 'deny' -and $output.permissionDecisionReason.StartsWith('Usage: 5h 90%') -and
-            $output.permissionDecisionReason.Contains('source: Codex session log')
+        (ConvertTo-Json -InputObject $fullUsage -Depth 10 -Compress) + "`n")
+    Assert-That 'Codex band 4 reports and waits for the user' {
+        (Get-LastLine (Invoke-Inject $testHome '.codex' 'codex' 'prompt')).Contains(
+            'Band 4: start nothing new; finish the current step, report, and wait for the user.')
     }
-    Assert-That 'the gate is only for Claude and Codex' { (Invoke-Inject $testHome '.gemini' 'gemini' 'dispatch').ExitCode -eq 2 }
 }
 
-function Test-ReportsUsage {
+function Get-DispatchInput {
+    param([string]$ToolUseId)
+    return '{"session_id":"s1","tool_use_id":"' + $ToolUseId + '","tool_name":"Agent"}'
+}
+
+function Get-AgentInput {
+    param([string]$AgentId)
+    return '{"session_id":"s1","agent_id":"' + $AgentId + '"}'
+}
+
+function Test-DispatchDenied {
+    param([string]$TestHome, [string]$ToolUseId)
+    $output = (ConvertFrom-OutputJson (Invoke-ClaudeHook $TestHome 'dispatch' (Get-DispatchInput $ToolUseId))).hookSpecificOutput
+    return $output.hookEventName -eq 'PreToolUse' -and $output.permissionDecision -eq 'deny'
+}
+
+function Test-DispatchAllowed {
+    param([string]$TestHome, [string]$ToolUseId)
+    return Test-NoOutput (Invoke-ClaudeHook $TestHome 'dispatch' (Get-DispatchInput $ToolUseId))
+}
+
+function Get-DispatchReason {
+    param([string]$TestHome, [string]$ToolUseId)
+    return (ConvertFrom-OutputJson (Invoke-ClaudeHook $TestHome 'dispatch' (Get-DispatchInput $ToolUseId))).hookSpecificOutput.permissionDecisionReason
+}
+
+# Starts the gate for every tool use id at the same time; returns how many of the calls it allowed.
+function Get-ParallelAllowedCount {
+    param([string]$TestHome, [string[]]$ToolUseIds)
+    Set-IsolatedEnvironment $TestHome
+    $scriptPath = Join-TestPath $TestHome '.claude/unlazier/inject.ps1'
+    $processes = @($ToolUseIds | ForEach-Object {
+        $inputFile = Join-TestPath $TestHome "parallel-$_.in"
+        Write-TestFile $inputFile (Get-DispatchInput $_)
+        Start-Process -FilePath $PowerShellPath -NoNewWindow -PassThru -RedirectStandardInput $inputFile `
+            -RedirectStandardOutput (Join-TestPath $TestHome "parallel-$_.out") -RedirectStandardError (Join-TestPath $TestHome "parallel-$_.err") `
+            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$scriptPath`"", 'claude', 'dispatch')
+    })
+    $processes | ForEach-Object { $_.WaitForExit() }
+    return @($ToolUseIds | Where-Object { [System.IO.File]::ReadAllText((Join-TestPath $TestHome "parallel-$_.out")) -eq '' }).Count
+}
+
+function Get-StateCounts {
+    param([string]$TestHome)
+    $state = Read-TestJson (Get-SessionStatePath $TestHome)
+    return "$(@($state.agents.PSObject.Properties).Count) $(@($state.reservations).Count)"
+}
+
+function Test-DispatchGateCountsRunningSubagents {
+    Write-Host 'the subagent gate follows the band and the running subagents'
+    $testHome = New-TestHome
+    [void](Invoke-Installer $testHome @('-Harness', 'claude'))
+    $statePath = Get-SessionStatePath $testHome
+
+    Write-ClaudeUsage $testHome 50 10
+    1..4 | ForEach-Object { [void](Invoke-ClaudeHook $testHome 'agent-start' (Get-AgentInput "a$_")) }
+    Assert-That 'band 1 allows with four running' { Test-DispatchAllowed $testHome 't0' }
+    1..4 | ForEach-Object { [void](Invoke-ClaudeHook $testHome 'agent-stop' (Get-AgentInput "a$_")) }
+
+    Write-ClaudeUsage $testHome 80 10
+    Assert-That 'band 2 allows the first subagent' { Test-DispatchAllowed $testHome 't1' }
+    Assert-That 'band 2 allows the second subagent' { Test-DispatchAllowed $testHome 't2' }
+    Assert-That 'band 2 denies a third launch' { Test-DispatchDenied $testHome 't3' }
+    Assert-That 'the denial says two are running' { (Get-DispatchReason $testHome 't3').Contains('2 subagents are running') }
+    [void](Invoke-ClaudeHook $testHome 'agent-start' (Get-AgentInput 'a1'))
+    [void](Invoke-ClaudeHook $testHome 'agent-start' (Get-AgentInput 'a2'))
+    Assert-That 'two started subagents replace their reservations' { (Get-StateCounts $testHome) -eq '2 0' }
+    Assert-That 'band 2 still denies with two running' { Test-DispatchDenied $testHome 't4' }
+    [void](Invoke-ClaudeHook $testHome 'agent-stop' (Get-AgentInput 'a1'))
+    Assert-That 'band 2 allows again when one finishes' { Test-DispatchAllowed $testHome 't5' }
+
+    Write-ClaudeUsage $testHome 90 10
+    Assert-That 'band 3 denies' { Test-DispatchDenied $testHome 't6' }
+    Assert-That 'band 3 asks to work alone' { (Get-DispatchReason $testHome 't6').Contains('continue the work yourself') }
+    Write-ClaudeUsage $testHome 97 10
+    Assert-That 'band 4 denies' { Test-DispatchDenied $testHome 't7' }
+
+    $now = Get-UnixNow
+    Write-TestJson $statePath ([pscustomobject]@{ agents = [pscustomobject]@{ old = $now - 18001 }; reservations = @($now - 121) })
+    Write-ClaudeUsage $testHome 80 10
+    Assert-That 'expired entries no longer count' {
+        [void](Invoke-ClaudeHook $testHome 'dispatch' (Get-DispatchInput 't8'))
+        (Get-StateCounts $testHome) -eq '0 1'
+    }
+
+    Remove-Item -LiteralPath $statePath -Force
+    Assert-That 'six parallel launches in band 2 allow exactly two' {
+        (Get-ParallelAllowedCount $testHome @(1..6 | ForEach-Object { "p$_" })) -eq 2
+    }
+
+    Remove-Item -LiteralPath (Join-TestPath $testHome '.claude/state/rate_limits.json') -Force
+    Remove-Item -LiteralPath $statePath -Force
+    Assert-That 'unknown usage allows two' { Test-DispatchAllowed $testHome 'u1' }
+    [void](Test-DispatchAllowed $testHome 'u2')
+    Assert-That 'unknown usage denies a third' { Test-DispatchDenied $testHome 'u3' }
+
+    Write-ClaudeUsage $testHome 80 10
+    Assert-That 'an unsafe session id is not counted and allowed' {
+        Test-NoOutput (Invoke-ClaudeHook $testHome 'dispatch' '{"session_id":"../x","tool_use_id":"t9"}')
+    }
+    Assert-That 'no state file escapes the state folder' {
+        -not (Test-Path -LiteralPath (Join-TestPath $testHome '.claude/unlazier/x.json'))
+    }
+    [void](Invoke-Uninstaller $testHome @('-Harness', 'claude'))
+    Assert-That 'uninstalling removes the session state' {
+        -not (Test-Path -LiteralPath (Join-TestPath $testHome '.claude/unlazier/state'))
+    }
+}
+
+function Get-ToolHookContext {
+    param([string]$TestHome, [string]$InputText)
+    return (ConvertFrom-OutputJson (Invoke-ClaudeHook $TestHome 'tool' $InputText)).hookSpecificOutput.additionalContext
+}
+
+function Test-ToolHookAnnouncesBandChanges {
+    Write-Host 'the tool hook speaks only when the band changes'
+    $testHome = New-TestHome
+    [void](Invoke-Installer $testHome @('-Harness', 'claude'))
+    $main = '{"session_id":"s1"}'
+    $subagent = '{"session_id":"s1","agent_id":"a1","agent_type":"Explore"}'
+
+    Write-ClaudeUsage $testHome 50 10
+    [void](Invoke-ClaudeHook $testHome 'prompt' $main)
+    Assert-That 'same band as the prompt is silent' { Test-NoOutput (Invoke-ClaudeHook $testHome 'tool' $main) }
+    Write-ClaudeUsage $testHome 72 10
+    Assert-That 'a band change reaches the main agent' {
+        (Get-ToolHookContext $testHome $main).Contains('Band 2: start a subagent only while fewer than 2 are running.')
+    }
+    Assert-That 'the same band again is silent' { Test-NoOutput (Invoke-ClaudeHook $testHome 'tool' $main) }
+    Assert-That 'a subagent below band 4 is silent' { Test-NoOutput (Invoke-ClaudeHook $testHome 'tool' $subagent) }
+    Write-ClaudeUsage $testHome 96 10
+    Assert-That 'band 4 tells a subagent to wrap up' { (Get-ToolHookContext $testHome $subagent).Contains('Wrap up now') }
+    Assert-That 'the wrap-up is said once' { Test-NoOutput (Invoke-ClaudeHook $testHome 'tool' $subagent) }
+    Assert-That 'band 4 gives the main agent the waiter command' {
+        (Get-ToolHookContext $testHome $main).Contains('inject.ps1" claude wait s1')
+    }
+    Assert-That 'no session id is silent' { Test-NoOutput (Invoke-ClaudeHook $testHome 'tool' '{}') }
+}
+
+# The Stop hook input of session s1, whose transcript is at the given path.
+function Get-StopInput {
+    param([bool]$IsActive, [string]$Message, [string]$TranscriptPath)
+    return ConvertTo-Json -Compress -InputObject ([pscustomobject]@{ session_id = 's1'; transcript_path = $TranscriptPath
+        stop_hook_active = $IsActive; last_assistant_message = $Message })
+}
+
+function Test-Blocked {
     param($Result)
-    $output = (ConvertFrom-OutputJson $Result).hookSpecificOutput
-    return $output.hookEventName -eq 'PostToolUse' -and $output.additionalContext.StartsWith('Usage: ')
+    $output = ConvertFrom-OutputJson $Result
+    return $output.decision -eq 'block' -and $output.reason.Length -gt 0
 }
 
-function Test-InjectBackgroundSubagent {
-    Write-Host 'a subagent launched in the background adds no usage line'
+function Test-StopHook {
+    Write-Host 'the stop hook keeps the turn going where the bands say so'
+    $testHome = New-TestHome
+    [void](Invoke-Installer $testHome @('-Harness', 'claude'))
+    $transcript = Join-TestPath $testHome '.claude/projects/-project/s1.jsonl'
+    $done = Get-StopInput $false 'Done.' $transcript
+
+    Write-ClaudeUsage $testHome 96 10
+    Assert-That 'another tool running the Claude Code hooks is never held' {
+        Test-NoOutput (Invoke-ClaudeHook $testHome 'stop' (Get-StopInput $false 'Done.' (Join-TestPath $testHome '.devin/transcripts/s1.jsonl')))
+    }
+    Assert-That 'band 4 without a waiter blocks the stop' { Test-Blocked (Invoke-ClaudeHook $testHome 'stop' $done) }
+    Assert-That 'the block names the waiter' {
+        (ConvertFrom-OutputJson (Invoke-ClaudeHook $testHome 'stop' $done)).reason.Contains('inject.ps1" claude wait s1')
+    }
+    Assert-That 'a stop already continued by the hook ends' {
+        Test-NoOutput (Invoke-ClaudeHook $testHome 'stop' (Get-StopInput $true 'Done.' $transcript))
+    }
+    $sleeper = Start-Process -FilePath $PowerShellPath -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -NoNewWindow -PassThru
+    Write-TestJson (Get-SessionStatePath $testHome) ([pscustomobject]@{
+        waiter = [pscustomobject]@{ pid = $sleeper.Id; until = (Get-UnixNow) + 600 } })
+    Assert-That 'a live waiter lets the turn end' { Test-NoOutput (Invoke-ClaudeHook $testHome 'stop' $done) }
+    Stop-Process -Id $sleeper.Id -Force
+    $sleeper.WaitForExit()
+    Assert-That 'a dead waiter blocks again' { Test-Blocked (Invoke-ClaudeHook $testHome 'stop' $done) }
+
+    Write-ClaudeUsage $testHome 90 10
+    Assert-That 'band 3 blocks a stop that cites usage' {
+        $message = "Por que parei aqui: o uso est$([char]0x00E1) acima de 90% da janela de 5 horas."
+        Test-Blocked (Invoke-ClaudeHook $testHome 'stop' (Get-StopInput $false $message $transcript))
+    }
+    Assert-That 'band 3 lets a finished task end' {
+        Test-NoOutput (Invoke-ClaudeHook $testHome 'stop' (Get-StopInput $false 'All tests pass.' $transcript))
+    }
+    Write-ClaudeUsage $testHome 40 10
+    Assert-That 'band 1 lets any stop end' {
+        Test-NoOutput (Invoke-ClaudeHook $testHome 'stop' (Get-StopInput $false 'The 5-hour window is at 40%.' $transcript))
+    }
+}
+
+# A Start-Sleep that records how long the waiter asked to sleep and the session state at that
+# moment. inject.ps1 keeps no test seam: run through this wrapper, the function takes precedence
+# over the cmdlet, as the fake sleep first on PATH does in install_test.sh.
+$FakeSleepWrapper = @'
+$fakeSleepHome = $PSScriptRoot
+function Start-Sleep {
+    param([int]$Seconds)
+    $lines = @([string]$Seconds)
+    $state = [System.IO.Path]::Combine($fakeSleepHome, '.claude', 'unlazier', 'state', 'session-s1.json')
+    if (Test-Path -LiteralPath $state) {
+        $lines += [System.IO.File]::ReadAllText($state).TrimEnd()
+    }
+    [System.IO.File]::AppendAllText([System.IO.Path]::Combine($fakeSleepHome, 'sleep.log'), ($lines -join "`n") + "`n")
+}
+& ([System.IO.Path]::Combine($fakeSleepHome, '.claude', 'unlazier', 'inject.ps1')) @args
+exit $LASTEXITCODE
+'@
+
+function Invoke-Waiter {
+    param([string]$TestHome, [string[]]$Arguments)
+    return Invoke-TestScript $TestHome (Join-TestPath $TestHome 'run-waiter.ps1') $Arguments
+}
+
+function Get-SleepLog {
+    param([string]$TestHome)
+    return [System.IO.File]::ReadAllLines((Join-TestPath $TestHome 'sleep.log'))
+}
+
+function Test-Between {
+    param([int]$Value, [int]$Low, [int]$High)
+    return $Value -ge $Low -and $Value -le $High
+}
+
+# A full 5-hour window that resets in ten minutes; the weekly window resets in a day.
+function Write-FullFiveHourUsage {
+    param([string]$TestHome, [double]$Weekly)
+    $now = Get-UnixNow
+    Write-TestJson (Join-TestPath $TestHome '.claude/state/rate_limits.json') ([pscustomobject]@{
+        captured_at = $now
+        five_hour = [pscustomobject]@{ used_percentage = 97; resets_at = $now + 600 }
+        seven_day = [pscustomobject]@{ used_percentage = $Weekly; resets_at = $now + 86400 }
+    })
+}
+
+function Test-Waiter {
+    Write-Host 'the waiter sleeps once until the reset plus three minutes'
     $testHome = New-TestHome
     [void](Invoke-Installer $testHome @('-Harness', 'claude,codex'))
-    Write-ClaudeUsage $testHome 40 50
-    $background = '{"tool_input":{"run_in_background":true}}'
+    Write-TestFile (Join-TestPath $testHome 'run-waiter.ps1') $FakeSleepWrapper
+    $sleepLog = Join-TestPath $testHome 'sleep.log'
 
-    Assert-That 'a background launch prints nothing' {
-        $result = Invoke-Inject $testHome '.claude' 'claude' 'subagent' $background
-        $result.ExitCode -eq 0 -and @($result.Lines | Where-Object { $_ -ne '' }).Count -eq 0
+    Write-ClaudeUsage $testHome 50 10
+    $result = Invoke-Waiter $testHome @('claude', 'wait', 's1')
+    Assert-That 'below band 4 it returns at once' { Test-HasLine $result.Lines 'No wait needed' }
+    Assert-That 'below band 4 it does not sleep' { -not (Test-Path -LiteralPath $sleepLog) }
+
+    # A PowerShell process takes longer to start than bash, hence a few more seconds of slack below.
+    Write-FullFiveHourUsage $testHome 10
+    $result = Invoke-Waiter $testHome @('claude', 'wait', 's1')
+    Assert-That 'one sleep until the 5-hour reset plus 180 seconds' { Test-Between ([int](Get-SleepLog $testHome)[0]) 775 781 }
+    Assert-That 'the waiter is recorded while it sleeps' { ((Get-SleepLog $testHome)[1] | ConvertFrom-Json).waiter.pid -gt 0 }
+    Assert-That 'the record is removed afterwards' {
+        $null -eq (Read-TestJson (Get-SessionStatePath $testHome)).PSObject.Properties['waiter']
     }
-    Assert-That 'a foreground launch reports usage' {
-        Test-ReportsUsage (Invoke-Inject $testHome '.claude' 'claude' 'subagent' '{"tool_input":{"run_in_background":false}}')
+    Assert-That 'it ends by asking to resume' { Test-HasLine $result.Lines 'Resume the plan' }
+
+    Remove-Item -LiteralPath $sleepLog -Force
+    Write-FullFiveHourUsage $testHome 99
+    [void](Invoke-Waiter $testHome @('claude', 'wait', 's1'))
+    Assert-That 'with both windows full it waits for the later reset' {
+        Test-Between ([int](Get-SleepLog $testHome)[0]) 86575 86581
     }
-    Assert-That 'a launch Claude Code sent to the background prints nothing' {
-        $result = Invoke-Inject $testHome '.claude' 'claude' 'subagent' '{"tool_input":{"prompt":"x"},"tool_response":{"status":"async_launched","agentId":"a1"}}'
-        $result.ExitCode -eq 0 -and @($result.Lines | Where-Object { $_ -ne '' }).Count -eq 0
-    }
-    Assert-That 'a remote launch prints nothing' {
-        $result = Invoke-Inject $testHome '.claude' 'claude' 'subagent' '{"tool_response":{"status":"remote_launched"}}'
-        $result.ExitCode -eq 0 -and @($result.Lines | Where-Object { $_ -ne '' }).Count -eq 0
-    }
-    Assert-That 'a completed subagent reports usage' {
-        Test-ReportsUsage (Invoke-Inject $testHome '.claude' 'claude' 'subagent' '{"tool_response":{"status":"completed"}}')
-    }
-    Assert-That 'invalid hook input reports usage' {
-        Test-ReportsUsage (Invoke-Inject $testHome '.claude' 'claude' 'subagent' 'not json')
-    }
-    Assert-That 'empty hook input reports usage' {
-        Test-ReportsUsage (Invoke-Inject $testHome '.claude' 'claude' 'subagent' '')
-    }
-    Assert-That 'no hook input reports usage' { Test-ReportsUsage (Invoke-Inject $testHome '.claude' 'claude' 'subagent') }
-    Assert-That 'Codex ignores the background flag' {
-        Test-ReportsUsage (Invoke-Inject $testHome '.codex' 'codex' 'subagent' $background)
+
+    Remove-Item -LiteralPath $sleepLog -Force
+    Write-TestJson (Join-TestPath $testHome '.claude/state/rate_limits.json') ([pscustomobject]@{
+        captured_at = Get-UnixNow; five_hour = [pscustomobject]@{ used_percentage = 97 } })
+    $result = Invoke-Waiter $testHome @('claude', 'wait', 's1')
+    Assert-That 'an unknown reset time fails' { $result.ExitCode -eq 1 }
+    Assert-That 'an unknown reset time does not sleep' { -not (Test-Path -LiteralPath $sleepLog) }
+    Assert-That 'the failure says to report' { Test-HasLine @($result.Lines + $result.Errors) 'report' }
+
+    Assert-That 'an unsafe session id is refused' { (Invoke-Waiter $testHome @('claude', 'wait', '../x')).ExitCode -eq 2 }
+    Assert-That 'a missing session id is refused' { (Invoke-Waiter $testHome @('claude', 'wait')).ExitCode -eq 2 }
+    Assert-That 'the waiter is only for Claude' {
+        (Invoke-TestScript $testHome (Join-TestPath $testHome '.codex/unlazier/inject.ps1') @('codex', 'wait', 's1')).ExitCode -eq 2
     }
 }
 
-function Test-AutoContinueNotice {
-    Write-Host 'the installer reports auto-continue turned off without changing it'
+function Test-UpgradeReplacesClaudeUsageHooks {
+    Write-Host 'upgrading replaces the 2.4 Claude usage hooks'
     $testHome = New-TestHome
     $settingsPath = Join-TestPath $testHome '.claude/settings.json'
-    Write-TestJson $settingsPath ([pscustomobject]@{ autoContinueAtUsageLimit = $false })
-    $result = Invoke-Installer $testHome @('-Harness', 'claude')
-
-    Assert-That 'the notice names the setting' {
-        @($result.Lines | Where-Object { $_ -like '*autoContinueAtUsageLimit is off*' }).Count -eq 1
-    }
-    Assert-That 'the setting stays off' { (Read-TestJson $settingsPath).autoContinueAtUsageLimit -eq $false }
+    $oldCommand = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' +
+        ((Join-TestPath $testHome '.claude/unlazier/inject.ps1') -replace '\\', '/') + '" claude subagent'
+    Write-TestJson $settingsPath ([pscustomobject]@{ hooks = [pscustomobject]@{ PostToolUse = [object[]]@(
+        [pscustomobject]@{ matcher = 'Agent'; hooks = [object[]]@([pscustomobject]@{ type = 'command'; command = $oldCommand }) },
+        [pscustomobject]@{ matcher = 'Agent'; hooks = [object[]]@([pscustomobject]@{ type = 'command'; command = 'my-own-hook' }) }) } })
+    [void](Invoke-Installer $testHome @('-Harness', 'claude'))
     $settings = Read-TestJson $settingsPath
-    $settings.autoContinueAtUsageLimit = $true
-    Write-TestJson $settingsPath $settings
-    Assert-That 'no notice when it is on' {
-        @((Invoke-Installer $testHome @('-Harness', 'claude')).Lines | Where-Object { $_ -like '*autoContinueAtUsageLimit is off*' }).Count -eq 0
+
+    Assert-That 'the old subagent usage hook is gone' {
+        @(Get-HookCommands $settings 'PostToolUse' | Where-Object { $_.Contains('claude subagent') }).Count -eq 0
+    }
+    Assert-That "the user's own hook is kept" { (Get-HookCommands $settings 'PostToolUse') -contains 'my-own-hook' }
+    Assert-That 'the end-of-turn alert sits next to the stop hook' {
+        $commands = @(Get-HookCommands $settings 'Stop')
+        @($commands | Where-Object { $_.Contains('alert.ps1') }).Count -eq 1 -and @($commands | Where-Object { $_.Contains('claude stop') }).Count -eq 1
     }
 }
 
@@ -1349,9 +1630,12 @@ try {
     Test-InjectOutputFormats
     Test-InjectProjectRules
     Test-InjectUntrustedProjectRules
-    Test-InjectDispatchGate
-    Test-InjectBackgroundSubagent
-    Test-AutoContinueNotice
+    Test-UsageBands
+    Test-DispatchGateCountsRunningSubagents
+    Test-ToolHookAnnouncesBandChanges
+    Test-StopHook
+    Test-Waiter
+    Test-UpgradeReplacesClaudeUsageHooks
     Test-UpgradeRemovesObsoletePayload
     Test-StatusLineSavesUsage
     Test-StatusLineTemporaryFileUnpredictable

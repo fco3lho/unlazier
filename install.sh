@@ -172,25 +172,36 @@ alert_command() {
 # Claude Code, Codex, Gemini CLI, and Devin share the same hook layout:
 # {"hooks": {"<Event>": [{"matcher": "...", "hooks": [{"type": "command", "command": "..."}]}]}}.
 # Entries whose command matches $owned (OWNED_SCRIPT_PATTERN) are ours; everything else is left
-# untouched. add_hook replaces only our entry for the same matcher, because one event can carry
-# several of ours (Claude Code PreToolUse has both the question alert and the subagent gate).
+# untouched. add_hook replaces only our entry for the same matcher and payload script, because one
+# event can carry several of ours (Claude Code PreToolUse has the question alert and the subagent
+# gate, and Stop has the end-of-turn alert and the band hook). without_ours_running drops every
+# entry of one payload script, so an upgrade also removes hooks that a version no longer uses.
 JQ_HOOK_HELPERS='
-def without_ours_where(targeted):
+def is_ours: (.command // "") | tostring | test($owned);
+def payload_script: [(.command // "") | tostring | match("(inject|alert|claude-statusline)[.](sh|ps1)").captures[0].string][0];
+def without_hooks_where(targeted; dropped):
     if type == "array" then
-        map(if (targeted) and (.hooks | type) == "array"
-            then .hooks |= map(select((.command // "") | tostring | test($owned) | not))
-            else . end)
+        map(if (targeted) and (.hooks | type) == "array" then .hooks |= map(select((dropped) | not)) else . end)
         | map(select((.hooks | type) != "array" or (.hooks | length) > 0))
     else . end;
-def without_ours: without_ours_where(true);
+def without_ours: without_hooks_where(true; is_ours);
+def without_events_left_empty:
+    .hooks |= with_entries(select((.value | type) != "array" or (.value | length) > 0));
+def without_ours_running($script):
+    if (.hooks | type) == "object" then
+        .hooks |= with_entries(.value |= without_hooks_where(true; is_ours and payload_script == $script))
+        | without_events_left_empty
+    else . end;
 def add_hook($event; $matcher; $command):
-    .hooks[$event] = (((.hooks // {})[$event] // []) | without_ours_where((.matcher // "") == $matcher))
+    ({command: $command} | payload_script) as $script
+    | .hooks[$event] = (((.hooks // {})[$event] // [])
+        | without_hooks_where((.matcher // "") == $matcher; is_ours and payload_script == $script))
         + [(if $matcher == "" then {} else {matcher: $matcher} end)
            + {hooks: [{type: "command", command: $command}]}];
 def remove_ours:
     if (.hooks | type) == "object" then
-        .hooks |= (with_entries(.value |= without_ours)
-            | with_entries(select((.value | type) != "array" or (.value | length) > 0)))
+        .hooks |= with_entries(.value |= without_ours)
+        | without_events_left_empty
         | if .hooks == {} then del(.hooks) else . end
     else . end;
 '
@@ -256,14 +267,20 @@ register_hooks() {
     home="$(harness_home "$harness")"
     case "$harness" in
         claude)
-            # The reminder reaches the model only with a prompt; the PostToolUse hook refreshes the
-            # usage line after each subagent, the long step of a turn, and the PreToolUse hook
-            # blocks a new subagent while the usage ladder forbids one.
+            # The reminder reaches the model only with a prompt. The PostToolUse hook runs after
+            # every tool call, in subagents too, and speaks only when the usage band changes; the
+            # PreToolUse hook blocks a subagent the band forbids, counting the running ones through
+            # SubagentStart and SubagentStop; the Stop hook keeps band 4 from ending without the waiter.
             update_json_file "$home/settings.json" \
-                'add_hook("UserPromptSubmit"; ""; $prompt) | add_hook("SessionStart"; "compact"; $compact)
-                 | add_hook("PostToolUse"; "Agent"; $subagent) | add_hook("PreToolUse"; "Agent"; $dispatch)' \
+                'without_ours_running("inject")
+                 | add_hook("UserPromptSubmit"; ""; $prompt) | add_hook("SessionStart"; "compact"; $compact)
+                 | add_hook("PreToolUse"; "Agent"; $dispatch) | add_hook("PostToolUse"; ""; $tool)
+                 | add_hook("Stop"; ""; $stop) | add_hook("SubagentStart"; ""; $agent_start)
+                 | add_hook("SubagentStop"; ""; $agent_stop)' \
                 --arg prompt "$(hook_command claude prompt)" --arg compact "$(hook_command claude compact)" \
-                --arg subagent "$(hook_command claude subagent)" --arg dispatch "$(hook_command claude dispatch)"
+                --arg dispatch "$(hook_command claude dispatch)" --arg tool "$(hook_command claude tool)" \
+                --arg stop "$(hook_command claude stop)" --arg agent_start "$(hook_command claude agent-start)" \
+                --arg agent_stop "$(hook_command claude agent-stop)"
             ;;
         codex)
             # Same usage hooks as Claude Code. The matcher is unanchored so it also matches the
@@ -867,13 +884,6 @@ harness_warnings() {
     local harness="$1" home
     home="$(harness_home "$harness")"
     case "$harness" in
-        claude)
-            # Read only to explain what happens at the usage limit; the user's choice is never
-            # changed. A settings file jq cannot read is reported when the hooks are registered.
-            [ "$HAS_JQ" = true ] && [ -f "$home/settings.json" ] \
-                && [ "$(jq '.autoContinueAtUsageLimit == false' "$home/settings.json" 2>/dev/null)" = "true" ] \
-                && add_notice "Claude Code: autoContinueAtUsageLimit is off, so after a usage limit the session waits for you instead of continuing the task on its own. Unlazier keeps your choice; turn it on in /config, or start a single wait from /rate-limit-options."
-            ;;
         codex)
             [ -f "$home/AGENTS.override.md" ] \
                 && add_notice "Codex: $home/AGENTS.override.md exists, and Codex ignores AGENTS.md while it does."
