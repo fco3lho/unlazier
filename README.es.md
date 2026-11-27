@@ -186,7 +186,7 @@ Los agentes auxiliares iniciados en una franja anterior siguen en ejecución has
 
 - Un hook en los agentes auxiliares bloquea los que la franja no permite, contando los que siguen en ejecución.
 - Un hook después de cada llamada a una herramienta, en el asistente y en sus agentes auxiliares, agrega la línea de uso cuando cambia la franja y, en la franja 4, les indica a los agentes auxiliares que cierren su trabajo. En otro caso no imprime nada, así que no gasta tokens.
-- Un hook al final del turno impide que la franja 4 termine sin el proceso de espera y retiene el turno una vez cuando el asistente intenta terminarlo por motivos de uso en las franjas 2 y 3.
+- Un hook al final del turno impide que la franja 4 termine sin el proceso de espera y retiene el turno una vez cuando el asistente intenta terminarlo por motivos de uso en las franjas 2 y 3. En las franjas 1 a 3, también retiene el turno una vez cuando todavía hay agentes auxiliares en ejecución, para que el asistente busque trabajo independiente antes de esperar; los mismos agentes auxiliares nunca lo retienen dos veces.
 
 En Codex CLI, el hook en los agentes auxiliares los bloquea en las franjas 3 y 4.
 

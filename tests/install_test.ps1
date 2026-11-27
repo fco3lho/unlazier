@@ -1398,6 +1398,41 @@ function Test-StopHook {
     }
 }
 
+function Get-WaitingStop {
+    param([string]$TestHome, [bool]$IsActive = $false)
+    $transcript = Join-TestPath $TestHome '.claude/projects/-project/s1.jsonl'
+    return Invoke-ClaudeHook $TestHome 'stop' (Get-StopInput $IsActive 'Waiting for the subagent.' $transcript)
+}
+
+function Test-StopHookHoldsWaitingStop {
+    Write-Host 'the stop hook holds a turn once while subagents run'
+    $testHome = New-TestHome
+    [void](Invoke-Installer $testHome @('-Harness', 'claude'))
+
+    Write-ClaudeUsage $testHome 40 10
+    Assert-That 'no running subagent lets the turn end' { Test-NoOutput (Get-WaitingStop $testHome) }
+    [void](Invoke-ClaudeHook $testHome 'agent-start' (Get-AgentInput 'a1'))
+    Assert-That 'a stop already continued by the hook ends with a subagent running' {
+        Test-NoOutput (Get-WaitingStop $testHome $true)
+    }
+    $reason = (ConvertFrom-OutputJson (Get-WaitingStop $testHome)).reason
+    Assert-That 'band 1 holds the stop and counts the subagents' { $reason.Contains('1 subagent(s) still running') }
+    Assert-That 'band 1 asks to start or continue work' { $reason.Contains('start or continue') }
+    Assert-That 'the same subagent holds the turn only once' { Test-NoOutput (Get-WaitingStop $testHome) }
+    [void](Invoke-ClaudeHook $testHome 'agent-start' (Get-AgentInput 'a2'))
+    Assert-That 'a new subagent holds the turn again' { Test-Blocked (Get-WaitingStop $testHome) }
+
+    Write-ClaudeUsage $testHome 80 10
+    [void](Invoke-ClaudeHook $testHome 'agent-start' (Get-AgentInput 'a3'))
+    $reason = (ConvertFrom-OutputJson (Get-WaitingStop $testHome)).reason
+    Assert-That 'band 2 at the limit asks for work without a new subagent' { $reason.Contains('without starting a subagent') }
+
+    Write-ClaudeUsage $testHome 90 10
+    [void](Invoke-ClaudeHook $testHome 'agent-start' (Get-AgentInput 'a4'))
+    $reason = (ConvertFrom-OutputJson (Get-WaitingStop $testHome)).reason
+    Assert-That 'band 3 asks for work without a new subagent' { $reason.Contains('without starting a subagent') }
+}
+
 # A Start-Sleep that records how long the waiter asked to sleep and the session state at that
 # moment. inject.ps1 keeps no test seam: run through this wrapper, the function takes precedence
 # over the cmdlet, as the fake sleep first on PATH does in install_test.sh.
@@ -1634,6 +1669,7 @@ try {
     Test-DispatchGateCountsRunningSubagents
     Test-ToolHookAnnouncesBandChanges
     Test-StopHook
+    Test-StopHookHoldsWaitingStop
     Test-Waiter
     Test-UpgradeReplacesClaudeUsageHooks
     Test-UpgradeRemovesObsoletePayload
