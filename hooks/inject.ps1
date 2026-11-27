@@ -11,8 +11,9 @@
 #   tool         (Claude Code) runs after every tool call, in the main agent and in subagents; prints
 #                the usage line when the band changed since that agent last heard it, and tells
 #                subagents to wrap up in band 4.
-#   stop         (Claude Code) keeps the turn going in band 4 until the waiter runs, and once when the
-#                agent ends the turn over usage in bands 2 and 3.
+#   stop         (Claude Code) keeps the turn going in band 4 until the waiter runs, once when the
+#                agent ends the turn over usage in bands 2 and 3, and once per running subagent when
+#                it ends the turn in bands 1 to 3 while subagents run.
 #   agent-start, agent-stop
 #                (Claude Code) keep the count of running subagents that the gate reads in band 2.
 #   wait         (Claude Code) started by the agent in the background in band 4: sleeps once until
@@ -517,7 +518,8 @@ function Read-StateDocument {
 
 # The session state with expired entries dropped: Agents (agent id -> start epoch), Reservations
 # (epochs of allowed launches not started yet), Announced ("main" or agent id -> band last told),
-# and Waiter ({pid, until} or $null). Anything damaged starts over empty. The caller holds the lock.
+# Held (agent id -> $true once a stop was held while it ran), and Waiter ({pid, until} or $null).
+# Anything damaged starts over empty. The caller holds the lock.
 function Read-SessionState {
     param([string]$Path)
     $now = Get-UnixTimeNow
@@ -532,7 +534,10 @@ function Read-SessionState {
     }
     $announced = [ordered]@{}
     Get-ObjectProperties (Get-JsonProperty $document 'announced') | ForEach-Object { $announced[$_.Name] = $_.Value }
+    $held = [ordered]@{}
+    Get-ObjectProperties (Get-JsonProperty $document 'held') | ForEach-Object { $held[$_.Name] = $_.Value }
     return @{
+        Held = $held
         Agents = $agents
         Reservations = [object[]]@($reservations | Where-Object { (Test-Number $_) -and $_ -gt $now - $MaxReservationSeconds })
         Announced = $announced
@@ -544,7 +549,7 @@ function Read-SessionState {
 # a single step, so a hook killed while writing leaves the old state whole. The caller holds the lock.
 function Write-SessionState {
     param([string]$Path, $State)
-    $document = [ordered]@{ agents = $State.Agents; reservations = $State.Reservations; announced = $State.Announced }
+    $document = [ordered]@{ agents = $State.Agents; reservations = $State.Reservations; announced = $State.Announced; held = $State.Held }
     if ($null -ne $State.Waiter) {
         $document['waiter'] = $State.Waiter
     }
@@ -875,6 +880,48 @@ function Test-StopBlamesUsage {
     return [regex]::IsMatch((Get-HookField 'last_assistant_message'), $UsageStopPattern, $options)
 }
 
+# Returns how many subagents are running and marks them as held, or 0 when none of them is new since
+# the last hold, so a session with nothing else to do is not held again.
+function Set-WaitingStopMark {
+    param([string]$Path)
+    $lock = Enter-StateLock $Path
+    try {
+        $state = Read-SessionState $Path
+        $running = @($state.Agents.Keys)
+        if (@($running | Where-Object { $state.Held[$_] -ne $true }).Count -eq 0) {
+            return 0
+        }
+        $held = [ordered]@{}
+        $running | ForEach-Object { $held[$_] = $true }
+        $state.Held = $held
+        Write-SessionState $Path $state
+        return $running.Count
+    } finally {
+        Exit-StateLock $lock
+    }
+}
+
+# Why a turn that ends while subagents run must go on once, or ''.
+function Get-WaitingStopReason {
+    param($Usage, [string]$Session)
+    try {
+        $count = Set-WaitingStopMark (Get-SessionFile $Session)
+    } catch {
+        # The hook never holds a turn over a failure of its own.
+        Write-HookError "the running subagents could not be checked: $($_.Exception.Message)"
+        return ''
+    }
+    if ($count -eq 0) {
+        return ''
+    }
+    if ($Usage.Band -eq 1 -or ($Usage.Band -eq 2 -and $count -lt $Band2SubagentLimit)) {
+        $action = 'start or continue work that is independent of them'
+    } else {
+        $action = 'continue, without starting a subagent, work in this session that is independent of them'
+    }
+    return "$($Usage.Line) $count subagent(s) still running. Before ending the turn, ${action}: other tasks of the request, preparation of the next step, checks of what already finished. End the turn only if nothing independent is left or a decision belongs to the user, and say which."
+}
+
 # Why the turn must go on, or '' to let it end. A stop the hook already continued always ends, so
 # the hook never holds a turn twice for the same reason.
 function Get-StopReason {
@@ -900,14 +947,13 @@ function Get-StopReason {
             }
             return "$($usage.Line) $(Get-WaiterInstruction $session)"
         }
-        { $_ -in @(2, 3) } {
-            if (Test-StopBlamesUsage) {
+        { $_ -in @(1, 2, 3) } {
+            if ($usage.Band -ne 1 -and (Test-StopBlamesUsage)) {
                 return "$($usage.Line) Usage is not a reason to end the turn in band $($usage.Band): continue the remaining work. End the turn only when the task is done or needs a decision from the user."
             }
-            return ''
+            return Get-WaitingStopReason $usage $session
         }
-        # Band 1 never holds the turn.
-        default { return '' }
+        default { throw "unknown band '$($usage.Band)'" }
     }
 }
 

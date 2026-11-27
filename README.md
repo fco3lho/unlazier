@@ -184,7 +184,7 @@ Helper agents started in an earlier band keep running until they finish. Without
 
 - A hook on helper agents blocks the ones the band does not allow, counting the ones still running.
 - A hook after every tool call, in the assistant and in its helper agents, adds the usage line when the band changes and tells helper agents to wrap up in band 4. It prints nothing otherwise, so it costs no tokens.
-- A hook at the end of the turn keeps band 4 from ending without the waiter, and holds the turn once when the assistant tries to end it over usage in bands 2 and 3.
+- A hook at the end of the turn keeps band 4 from ending without the waiter, and holds the turn once when the assistant tries to end it over usage in bands 2 and 3. In bands 1 to 3, it also holds the turn once when helper agents are still running, so the assistant looks for independent work before waiting; the same helper agents never hold it twice.
 
 In Codex CLI, the hook on helper agents blocks them in bands 3 and 4.
 

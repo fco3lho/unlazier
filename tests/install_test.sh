@@ -1041,6 +1041,48 @@ test_stop_hook() {
         test -z "$(claude_hook "$home" stop "$(stop_input false 'The 5-hour window is at 40%.')")"
 }
 
+waiting_stop() { claude_hook "$1" stop "$(stop_input "${2:-false}" 'Waiting for the subagent.')"; }
+
+block_reason() { waiting_stop "$1" | jq -r '.reason'; }
+
+start_agent() { claude_hook "$1" agent-start "{\"session_id\":\"s1\",\"agent_id\":\"$2\"}"; }
+
+test_stop_hook_holds_a_waiting_stop() {
+    local home reason
+    echo "the stop hook holds a turn once while subagents run"
+    home="$(new_home)"
+    run_installer "$home" --harness claude >/dev/null 2>&1
+    STOP_TRANSCRIPT="$home/.claude/projects/-project/s1.jsonl"
+
+    write_claude_usage "$home" 40 10
+    check "no running subagent lets the turn end" test -z "$(waiting_stop "$home")"
+    start_agent "$home" a1
+    check "a stop already continued by the hook ends with a subagent running" test -z "$(waiting_stop "$home" true)"
+    reason="$(block_reason "$home")"
+    check "band 1 holds the stop and counts the subagents" grep -qF '1 subagent(s) still running' <<< "$reason"
+    check "band 1 asks to start or continue work" grep -qF 'start or continue' <<< "$reason"
+    check "the same subagent holds the turn only once" test -z "$(waiting_stop "$home")"
+    start_agent "$home" a2
+    check "a new subagent holds the turn again" is_blocked < <(waiting_stop "$home")
+
+    write_claude_usage "$home" 80 10
+    start_agent "$home" a3
+    reason="$(block_reason "$home")"
+    check "band 2 at the limit asks for work without a new subagent" grep -qF 'without starting a subagent' <<< "$reason"
+
+    write_claude_usage "$home" 90 10
+    start_agent "$home" a4
+    reason="$(block_reason "$home")"
+    check "band 3 asks for work without a new subagent" grep -qF 'without starting a subagent' <<< "$reason"
+
+    rm -f "$home/.claude/unlazier/state/session-s1.json"
+    write_claude_usage "$home" 40 10
+    start_agent "$home" a5
+    chmod a-w "$home/.claude/unlazier/state"
+    check "a state folder that cannot be written lets the turn end" test -z "$(waiting_stop "$home" 2>/dev/null)"
+    chmod u+w "$home/.claude/unlazier/state"
+}
+
 # A stand-in for sleep that records how long the waiter asked to sleep and the state at that moment.
 install_fake_sleep() {
     local folder="$1"
@@ -1231,6 +1273,7 @@ main() {
     test_dispatch_gate_counts_running_subagents
     test_tool_hook_announces_band_changes
     test_stop_hook
+    test_stop_hook_holds_a_waiting_stop
     test_waiter
     test_upgrade_replaces_claude_usage_hooks
     test_upgrade_removes_obsolete_payload

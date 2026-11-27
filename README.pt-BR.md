@@ -186,7 +186,7 @@ Agentes auxiliares iniciados numa faixa anterior continuam rodando até terminar
 
 - Um hook nos agentes auxiliares bloqueia os que a faixa não permite, contando os que ainda estão rodando.
 - Um hook após cada chamada de ferramenta, no assistente e nos agentes auxiliares dele, acrescenta a linha de uso quando a faixa muda e, na faixa 4, diz aos agentes auxiliares para encerrar. Fora isso, ele não imprime nada, então não gasta tokens.
-- Um hook no fim do turno impede que a faixa 4 termine sem o processo de espera e segura o turno uma vez quando o assistente tenta encerrá-lo por causa do uso nas faixas 2 e 3.
+- Um hook no fim do turno impede que a faixa 4 termine sem o processo de espera e segura o turno uma vez quando o assistente tenta encerrá-lo por causa do uso nas faixas 2 e 3. Nas faixas 1 a 3, também segura o turno uma vez quando ainda há agentes auxiliares rodando, para o assistente procurar trabalho independente antes de esperar; os mesmos agentes auxiliares nunca o seguram duas vezes.
 
 No Codex CLI, o hook nos agentes auxiliares os bloqueia nas faixas 3 e 4.
 

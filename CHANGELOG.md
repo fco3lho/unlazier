@@ -2,6 +2,12 @@
 
 All notable changes to Unlazier (called Unlazier AI before version 2.1) are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Hold on a waiting stop (Claude Code):** in bands 1 to 3, the `Stop` hook holds the turn once when the assistant tries to end it while helper agents are still running, and asks it to do independent work or say that none is left. The same helper agents never hold the turn twice.
+
 ## [2.5.0] - 2026-11-25
 
 ### Added

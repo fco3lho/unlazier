@@ -12,8 +12,9 @@
 #   tool         (Claude Code) runs after every tool call, in the main agent and in subagents; prints
 #                the usage line when the band changed since that agent last heard it, and tells
 #                subagents to wrap up in band 4.
-#   stop         (Claude Code) keeps the turn going in band 4 until the waiter runs, and once when the
-#                agent ends the turn over usage in bands 2 and 3.
+#   stop         (Claude Code) keeps the turn going in band 4 until the waiter runs, once when the
+#                agent ends the turn over usage in bands 2 and 3, and once per running subagent when
+#                it ends the turn in bands 1 to 3 while subagents run.
 #   agent-start, agent-stop
 #                (Claude Code) keep the count of running subagents that the gate reads in band 2.
 #   wait         (Claude Code) started by the agent in the background in band 4: sleeps once until
@@ -158,7 +159,8 @@ end
 
 # The session state with expired entries dropped: {agents: {<agent id>: <start epoch>},
 # reservations: [<epoch of an allowed launch not started yet>], announced: {<"main" or agent id>:
-# <band last told>}, waiter: {pid, until}}. Anything damaged starts over empty.
+# <band last told>}, held: {<agent id>: true once a stop was held while it ran}, waiter: {pid,
+# until}}. Anything damaged starts over empty.
 # shellcheck disable=SC2016
 STATE_PROGRAM='
 def current: (if type == "object" then . else {} end)
@@ -166,7 +168,8 @@ def current: (if type == "object" then . else {} end)
         then with_entries(select((.value | type) == "number" and .value > now - $max_agent_age)) else {} end)
     | .reservations = ((.reservations // []) | if type == "array"
         then map(select(type == "number" and . > now - $max_reservation_age)) else [] end)
-    | .announced = ((.announced // {}) | if type == "object" then . else {} end);
+    | .announced = ((.announced // {}) | if type == "object" then . else {} end)
+    | .held = ((.held // {}) | if type == "object" then . else {} end);
 '
 
 read_claude_usage() {
@@ -488,6 +491,30 @@ stop_blames_usage() {
         '(.last_assistant_message // "") | tostring | test($pattern; "i")' >/dev/null 2>&1
 }
 
+# Prints how many subagents are running and marks them as held; fails when none of them is new since
+# the last hold, so a session with nothing else to do is not held again. The caller holds the lock.
+mark_waiting_stop() {
+    local file="$1" count
+    count="$(read_state "$file" | jq '.held as $held
+        | if any(.agents | keys[]; $held[.] != true) then .agents | length else 0 end')" || return 1
+    [ "$count" -gt 0 ] || return 1
+    write_state "$file" '.held = (.agents | map_values(true))' || return 1
+    echo "$count"
+}
+
+# Why a turn that ends while subagents run must go on once, or nothing.
+waiting_stop_reason() {
+    local file count action
+    file="$(session_file "$1")"
+    count="$(with_lock "$file" mark_waiting_stop "$file")" || return 0
+    if [ "$BAND" = 1 ] || { [ "$BAND" = 2 ] && [ "$count" -lt "$BAND_2_SUBAGENT_LIMIT" ]; }; then
+        action="start or continue work that is independent of them"
+    else
+        action="continue, without starting a subagent, work in this session that is independent of them"
+    fi
+    echo "$USAGE_LINE $count subagent(s) still running. Before ending the turn, $action: other tasks of the request, preparation of the next step, checks of what already finished. End the turn only if nothing independent is left or a decision belongs to the user, and say which."
+}
+
 # Why the turn must go on, or nothing to let it end. A stop the hook already continued always ends,
 # so the hook never holds a turn twice for the same reason.
 stop_reason() {
@@ -504,12 +531,17 @@ stop_reason() {
                 echo "$USAGE_LINE $(waiter_instruction "$session")"
             fi
             ;;
-        2|3)
-            if stop_blames_usage; then
+        1|2|3)
+            if [ "$BAND" != 1 ] && stop_blames_usage; then
                 echo "$USAGE_LINE Usage is not a reason to end the turn in band $BAND: continue the remaining work. End the turn only when the task is done or needs a decision from the user."
+            else
+                waiting_stop_reason "$session"
             fi
             ;;
-        *) ;; # Band 1 never holds the turn.
+        *)
+            echo "inject.sh: unknown band '$BAND'" >&2
+            return 1
+            ;;
     esac
     return 0
 }
